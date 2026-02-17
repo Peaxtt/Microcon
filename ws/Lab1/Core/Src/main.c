@@ -29,7 +29,7 @@ TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 // --- Task 1 Variables ---
-uint16_t adc_buffer[400];    // Buffer รับค่าจาก DMA
+uint16_t adc_buffer[40];    // Buffer รับค่าจาก DMA
 uint32_t adc_avg[4];        // ค่าเฉลี่ย
 uint32_t val_TempSet = 0;   // 20-40 C
 uint32_t N_Fan = 0;         // 0-500 (ค่า N)
