@@ -1,0 +1,13 @@
+LaunchTargetManager/org.eclipse.launchbar.core.launchTargetType.local,Local/arch=x86_64
+LaunchTargetManager/org.eclipse.launchbar.core.launchTargetType.local,Local/name=Local
+LaunchTargetManager/org.eclipse.launchbar.core.launchTargetType.local,Local/os=win32
+configDescList=org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week1 Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week2 Debug (1),org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week2 Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week3 Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week4 Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Lab1 Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:1_SWV_Debug Debug,org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:2_ADC_DMA Debug
+eclipse.preferences.version=1
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Lab1\ Debug/activeLaunchMode=debug
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Lab1\ Debug/activeLaunchTarget=null\:---
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week1\ Debug/activeLaunchMode=debug
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week1\ Debug/activeLaunchTarget=null\:---
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week2\ Debug/activeLaunchMode=debug
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week3\ Debug/activeLaunchMode=debug
+org.eclipse.cdt.dsf.gdb.gdbRemotedescriptorType\:T2Week4\ Debug/activeLaunchMode=debug
+org.eclipse.launchbar.core.descriptorType.default\:T2Week2\ Debug\ (1)/activeLaunchTarget=org.eclipse.launchbar.core.launchTargetType.local\:Local

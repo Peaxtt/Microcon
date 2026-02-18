@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<item key="hasShownOverlayPopupBefore" value="true"/>
+	<item key="replaceBarOpen" value="false"/>
+	<list key="searchhistory">
+		<item value="tim3"/>
+		<item value="tim2"/>
+		<item value="__HAL_ADC_CALC_TEMPERATURE"/>
+		<item value=" M_light"/>
+		<item value="pulse_state"/>
+		<item value="internal_temp"/>
+		<item value="TIM2"/>
+		<item value="Tim"/>
+		<item value="val_TempSet"/>
+		<item value="GPIO_PIN_5"/>
+		<item value="GPIO_Pin"/>
+		<item value="GPIO"/>
+		<item value="SIGNAL_OUT"/>
+		<item value="internal_tem"/>
+		<item value="HAL_ADC_Start_DMA(&amp;hadc1,"/>
+	</list>
+</section>
