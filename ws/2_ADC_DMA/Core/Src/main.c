@@ -44,7 +44,7 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 /* USER CODE BEGIN PV */
- uint32_t adc_buffer[40]; // ใส่ volatile กัน compiler ตัดทิ้ง
+ uint32_t adc_buffer[400]; // ใส่ volatile กัน compiler ตัดทิ้ง
  uint32_t avg_val = 0;    // ตัวแปรที่จะดูใน Live Expression
 /* USER CODE END PV */
 
@@ -101,7 +101,7 @@ int main(void)
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 	  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED); // คาถาบูชา (Optional แต่ใส่ไว้ก็ดี)
-	  HAL_ADC_Start_DMA(&hadc1, adc_buffer, 40); // เริ่มอ่านลง Buffer (10 ตัว)
+	  HAL_ADC_Start_DMA(&hadc1, adc_buffer, 400); // เริ่มอ่านลง Buffer (10 ตัว)
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -333,11 +333,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
   if(hadc->Instance == ADC1)
   {
     uint32_t sum = 0;
-    for(int i = 0; i < 40; i+=4)
+    for(int i = 0; i < 400; i+=4)
     {
         sum += adc_buffer[i];
     }
-    avg_val = sum / 10;
+    avg_val = sum / 100;
   }
 }
 /* USER CODE END 4 */
