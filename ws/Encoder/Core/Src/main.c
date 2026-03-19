@@ -136,7 +136,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+	HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -174,34 +174,30 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  QEIReadRaw = __HAL_TIM_GET_COUNTER(&htim3);
-	            angleDegree = (QEIReadRaw / 840.0f) * 360.0f ;
-	            angleRadian = (QEIReadRaw / 840.0f) * (2.0f * PI);
+	        angleDegree = (QEIReadRaw / 840.0f) * 360.0f ;
+	        angleRadian = (QEIReadRaw / 840.0f) * (2.0f * PI);
 
-	            // สร้างตัวแปรจำค่าที่กรองแล้ว (ใส่คำว่า static เพื่อให้มันจำค่าข้ามรอบได้)
-	            static float filtered_adc = 0.0f;
+	        // เงื่อนไข: ถ้ากดปุ่ม B1 (Active Low) ให้ทำการอ่านค่า R-เกือกม้า
+	        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+	        {
+	            HAL_ADC_Start(&hadc1); // สั่งให้ ADC เริ่มวัดไฟ 1 แชะ
 
-	            if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET)
+	            // รอจนกว่าจะแปลงค่าเสร็จ (ไม่เกิน 10ms)
+	            if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
 	            {
-	                HAL_ADC_Start(&hadc1);
+	                adc_raw = HAL_ADC_GetValue(&hadc1); // ดึงค่า 0-4095 ออกมา
 
-	                if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
-	                {
-	                    adc_raw = HAL_ADC_GetValue(&hadc1);
-
-	                    // ท่าไม้ตาย 1: Exponential Moving Average Filter
-	                    // เอาค่าใหม่มาผสมแค่ 5% (0.05) และคงค่าเดิมไว้ 95% (0.95) ทำให้ตัวเลขเนียนกริบ
-	                    filtered_adc = (filtered_adc * 0.95f) + ((float)adc_raw * 0.05f);
-
-	                    if (TASK_MODE == 1) {
-	                        target_position_deg = (filtered_adc / 4095.0f) * 360.0f;
-	                    }
-	                    else if (TASK_MODE == 2) {
-	                        target_rpm = (filtered_adc / 4095.0f) * 120.0f;
-	                    }
+	                if (TASK_MODE == 1) {
+	                    target_position_deg = ((float)adc_raw / 4095.0f) * 360.0f;
 	                }
-	                HAL_ADC_Stop(&hadc1);
+	                else if (TASK_MODE == 2) {
+	                    // ข้อสังเกต: ในสไลด์ Task 2 สั่งเป็น 0 - 120 RPM ครับ ผมเลยแก้จาก 100 เป็น 120 ให้ตรงสไลด์เป๊ะๆ
+	                    target_rpm = ((float)adc_raw / 4095.0f) * 120.0f;
+	                }
 	            }
+	            HAL_ADC_Stop(&hadc1); // สั่งหยุดเพื่อรีเซ็ตสถานะ พร้อมอ่านในรอบถัดไป
 	        }
+	    }
   /* USER CODE END 3 */
 }
 
