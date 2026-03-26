@@ -45,6 +45,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
@@ -53,6 +54,7 @@ TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN PV */
 uint32_t adc_raw = 0;
+uint32_t adc_dma[20] = {0};
 uint32_t QEIReadRaw;
 float angleDegree;
 float angleRadian;
@@ -79,24 +81,24 @@ typedef struct {
 VeloObserverTypeDef VeloObserver = {0};
 
 // ===============================================
-uint8_t TASK_MODE = 2; // 1 = Position, 2 = Velocity
+volatile uint8_t TASK_MODE = 1; // 1 = Position (Cascade), 2 = Velocity
 
-// Velocity
-float target_rpm = 0.0f;
+// Velocity (Inner Loop)
+volatile float target_rpm = 0.0f; // ถอด volatile ออกไม่ได้ เพราะ SWV อาจจะอยากแก้
 float vel_error_integral = 0.0f;
 float prev_vel_error = 0.0f;
-float Kp_v = 1.5f;
-float Ki_v = 10.0f;
-float Kd_v = 0.0f;
+volatile float Kp_v = 1.5f;
+volatile float Ki_v = 10.0f;
+volatile float Kd_v = 0.0f;
 
-// Position
-float target_position_deg = 0.0f;
+// Position (Outer Loop)
+volatile float target_position_deg = 0.0f;
 float current_position_deg = 0.0f;
 float pos_error_integral = 0.0f;
 float prev_pos_error = 0.0f;
-float Kp_p = 3.0f;
-float Ki_p = 0.1f;
-float Kd_p = 0.0f;
+volatile float Kp_p = 3.0f;
+volatile float Ki_p = 0.0f;  // Cascade มักใช้แค่ P คุมตำแหน่ง
+volatile float Kd_p = 0.0f;
 
 int32_t pwm_out = 0;
 uint16_t timer_tick = 0;
@@ -106,6 +108,7 @@ uint16_t timer_tick = 0;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM5_Init(void);
@@ -136,7 +139,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -151,6 +154,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM3_Init();
   MX_TIM6_Init();
   MX_TIM5_Init();
@@ -160,10 +164,11 @@ int main(void)
   HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
   HAL_TIM_Base_Start_IT(&htim5);
   HAL_TIM_Base_Start_IT(&htim6);
+  HAL_ADC_Start_DMA(&hadc1, adc_dma, 20);
   VeloObsever_Init();
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
-  HAL_ADC_Start(&hadc1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -174,30 +179,33 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  QEIReadRaw = __HAL_TIM_GET_COUNTER(&htim3);
-	        angleDegree = (QEIReadRaw / 840.0f) * 360.0f ;
-	        angleRadian = (QEIReadRaw / 840.0f) * (2.0f * PI);
+	  	        angleDegree = (QEIReadRaw / 840.0f) * 360.0f ;
+	  	        angleRadian = (QEIReadRaw / 840.0f) * (2.0f * PI);
 
-	        // เงื่อนไข: ถ้ากดปุ่ม B1 (Active Low) ให้ทำการอ่านค่า R-เกือกม้า
-	        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-	        {
-	            HAL_ADC_Start(&hadc1); // สั่งให้ ADC เริ่มวัดไฟ 1 แชะ
+	  	        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_SET)
+	  	        {
 
-	            // รอจนกว่าจะแปลงค่าเสร็จ (ไม่เกิน 10ms)
-	            if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
-	            {
-	                adc_raw = HAL_ADC_GetValue(&hadc1); // ดึงค่า 0-4095 ออกมา
+	                  uint32_t adc_sum = 0;
+	                  for (int i = 0; i < 20; i++) {
+	                      adc_sum += adc_dma[i];
+	                  }
+	                  float adc_avg = (float)adc_sum / 20.0f;
 
-	                if (TASK_MODE == 1) {
-	                    target_position_deg = ((float)adc_raw / 4095.0f) * 360.0f;
-	                }
-	                else if (TASK_MODE == 2) {
-	                    // ข้อสังเกต: ในสไลด์ Task 2 สั่งเป็น 0 - 120 RPM ครับ ผมเลยแก้จาก 100 เป็น 120 ให้ตรงสไลด์เป๊ะๆ
-	                    target_rpm = ((float)adc_raw / 4095.0f) * 120.0f;
-	                }
-	            }
-	            HAL_ADC_Stop(&hadc1); // สั่งหยุดเพื่อรีเซ็ตสถานะ พร้อมอ่านในรอบถัดไป
-	        }
-	    }
+
+	  	            static float filtered_adc = 0.0f;
+	  	            const float alpha = 0.05f;
+	  	            filtered_adc = (1.0f - alpha) * filtered_adc + (alpha * adc_avg);
+
+	  	            if (TASK_MODE == 1) {
+	  	                target_position_deg = (filtered_adc / 4095.0f) * 360.0f;
+	  	            }
+	  	            else if (TASK_MODE == 2) {
+	  	                target_rpm = (filtered_adc / 4095.0f) * 120.0f;
+	  	            }
+	  	        }
+
+	  	        HAL_Delay(10);
+	  	    }
   /* USER CODE END 3 */
 }
 
@@ -281,7 +289,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   hadc1.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -511,6 +519,23 @@ static void MX_TIM6_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -592,60 +617,66 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
         timer_tick++;
 
         // ==========================================
-        //  Observer
+        //  Observer Update
         // ==========================================
         QEIEncoderPosVel_Update();
         VeloObserver.Realposition = QEIdata.Position[NEW];
         VeloObserver_Update();
 
         // ==========================================
-        // Task 2 (Velocity PID)
+        // Outer Loop: Position PID (500 Hz)
         // ==========================================
-        if (TASK_MODE == 2 && (timer_tick % 5 == 0)) {
+        if (TASK_MODE == 1 && (timer_tick % 10 == 0)) {
+            current_position_deg = ((float)QEIdata.QEIPostion_1turn / 840.0f) * 360.0f;
+
+            float error_p = target_position_deg - current_position_deg;
+
+            // Shortest Path
+            if (error_p > 180.0f) error_p -= 360.0f;
+            if (error_p < -180.0f) error_p += 360.0f;
+
+            // Deadband
+            if (error_p > -1.0f && error_p < 1.0f) {
+                error_p = 0.0f;
+                pos_error_integral = 0.0f;
+            }
+
+            pos_error_integral += error_p * POS_PID_PERIOD;
+            float derivative_p = (error_p - prev_pos_error) / POS_PID_PERIOD;
+
+            target_rpm = (Kp_p * error_p) + (Ki_p * pos_error_integral) + (Kd_p * derivative_p);
+
+            if (target_rpm > 120.0f) target_rpm = 120.0f;
+            if (target_rpm < -120.0f) target_rpm = -120.0f;
+
+            prev_pos_error = error_p;
+        }
+
+        // ==========================================
+        // Inner Loop: Velocity PID (1 kHz)
+        // ==========================================
+        if (timer_tick % 5 == 0) {
             float current_rpm = QEIdata.QEIAngularVelocity_RPM;
-            float error = target_rpm - current_rpm;
 
-            vel_error_integral += error * 0.001f; // dt = 0.001s
-            float derivative = (error - prev_vel_error) / 0.001f;
+            // ถ้า TASK_MODE = 2 ค่า target_rpm จะมาจากเกือกม้าโดยตรง
+            // ถ้า TASK_MODE = 1 ค่า target_rpm จะมาจาก Outer Loop ที่คำนวณไว้ด้านบน
+            float error_v = target_rpm - current_rpm;
 
-            pwm_out = (int32_t)(Kp_v * error + Ki_v * vel_error_integral + Kd_v * derivative);
-            prev_vel_error = error;
+            vel_error_integral += error_v * VELO_PID__PERIOD;
+            float derivative_v = (error_v - prev_vel_error) / VELO_PID__PERIOD;
+
+            // PWM to Motor
+            pwm_out = (int32_t)(Kp_v * error_v + Ki_v * vel_error_integral + Kd_v * derivative_v);
 
             // Saturation
             if (pwm_out > 199) pwm_out = 199;
             if (pwm_out < -199) pwm_out = -199;
+
+            prev_vel_error = error_v;
         }
 
         // ==========================================
-        // Task 1 (Position PID)
-        // ==========================================
-        else if (TASK_MODE == 1 && (timer_tick % 10 == 0)) {
-                    current_position_deg = ((float)QEIdata.QEIPostion_1turn / 840.0f) * 360.0f;
-
-                    float error = target_position_deg - current_position_deg;
-
-                    if (error > 180.0f) error -= 360.0f;
-                    if (error < -180.0f) error += 360.0f;
-
-                    // --------------------------------------------------
-                    if (error > -1.0f && error < 1.0f) {
-                        error = 0.0f;
-                        pos_error_integral = 0.0f;
-                    }
-                    // --------------------------------------------------
-
-                    pos_error_integral += error * 0.002f; // dt = 0.002s
-                    float derivative = (error - prev_pos_error) / 0.002f;
-
-                    pwm_out = (int32_t)(Kp_p * error + Ki_p * pos_error_integral + Kd_p * derivative);
-                    prev_pos_error = error;
-
-                    if (pwm_out > 199) pwm_out = 199;
-                    if (pwm_out < -199) pwm_out = -199;
-                }
-
-        // ==========================================
-        // PWM
+        // PWM Output
         // ==========================================
         if (pwm_out > 0) {
             __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, (uint32_t)pwm_out);
@@ -655,6 +686,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
             __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, (uint32_t)(-pwm_out));
         }
 
+        // Reset (10 รอบ = 500Hz)
         if (timer_tick >= 10) {
             timer_tick = 0;
         }
