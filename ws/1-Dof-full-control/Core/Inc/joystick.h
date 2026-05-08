@@ -4,7 +4,7 @@
 #include "main.h"
 
 #define PKT_LEN  15
-#define DEADZONE 1500
+#define DEADZONE 3200 // ~10% Deadband to prevent motor whine
 
 // Button defines
 #define BTN_DPAD_UP    0x0001

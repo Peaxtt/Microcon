@@ -17,61 +17,81 @@ static uint16_t modbus_crc(uint8_t *buf, uint16_t len) {
   return crc;
 }
 
-void modbus_init(ModbusSlave_t *slave, UART_HandleTypeDef *huart, uint16_t *regs, uint16_t count) {
+void modbus_init(ModbusSlave_t *slave, UART_HandleTypeDef *huart) {
   slave->huart = huart;
-  slave->registers = regs;
-  slave->reg_count = count;
-  slave->rx_idx = 0;
-  slave->last_rx_tick = 0;
+  memset(slave->registers, 0, sizeof(slave->registers));
+  slave->rx_len = 0;
+  slave->receiving = 0;
+  slave->frame_ready = 0;
+  slave->last_rx_time = 0;
+  
+  // Start DMA reception using Idle Line detection
+  HAL_UARTEx_ReceiveToIdle_DMA(slave->huart, slave->rx_buf, MODBUS_BUF_SIZE);
+}
+
+// Called by TIM7 every 1ms
+void modbus_tick_1ms(ModbusSlave_t *slave) {
+  if (slave->receiving) {
+    slave->last_rx_time++;
+    // T3.5 timeout for 19200 is ~1.75ms. We use 3ms to be safe and clear buffer if stuck
+    if (slave->last_rx_time > 3) { 
+      slave->receiving = 0;
+      slave->rx_len = 0; // Reset buffer if timeout without idle interrupt
+    }
+  }
+}
+
+// Called by HAL_UARTEx_RxEventCallback
+void modbus_rx_cplt(ModbusSlave_t *slave, uint16_t Size) {
+  // If we receive data, reset the idle timer and mark as receiving
+  slave->rx_len = Size;
+  slave->receiving = 0; // Finished receiving due to idle
+  slave->frame_ready = 1;
 }
 
 static void modbus_send_response(ModbusSlave_t *slave, uint16_t len) {
   uint16_t crc = modbus_crc(slave->rx_buf, len);
   slave->rx_buf[len++] = crc & 0xFF;
   slave->rx_buf[len++] = (crc >> 8) & 0xFF;
-  HAL_UART_Transmit(slave->huart, slave->rx_buf, len, 100);
+  HAL_UART_Transmit_DMA(slave->huart, slave->rx_buf, len);
 }
 
-void modbus_update(ModbusSlave_t *slave) {
-  uint8_t data;
-  if (HAL_UART_Receive(slave->huart, &data, 1, 0) == HAL_OK) {
-    if (HAL_GetTick() - slave->last_rx_tick > 5) { // T3.5 equivalent
-      slave->rx_idx = 0;
-    }
-    if (slave->rx_idx < MODBUS_BUF_SIZE) {
-      slave->rx_buf[slave->rx_idx++] = data;
-    }
-    slave->last_rx_tick = HAL_GetTick();
-  }
+// Called in the 100Hz main loop
+void modbus_process(ModbusSlave_t *slave) {
+  if (slave->frame_ready) {
+    slave->frame_ready = 0;
+    
+    if (slave->rx_len >= 8) {
+      if (slave->rx_buf[0] == MODBUS_SLAVE_ID) {
+        uint16_t crc_calc = modbus_crc(slave->rx_buf, slave->rx_len - 2);
+        uint16_t crc_rx = slave->rx_buf[slave->rx_len - 2] | (slave->rx_buf[slave->rx_len - 1] << 8);
+        
+        if (crc_calc == crc_rx) {
+          uint8_t func = slave->rx_buf[1];
+          uint16_t addr = (slave->rx_buf[2] << 8) | slave->rx_buf[3];
+          uint16_t val = (slave->rx_buf[4] << 8) | slave->rx_buf[5];
 
-  if (slave->rx_idx >= 8 && HAL_GetTick() - slave->last_rx_tick > 2) {
-    if (slave->rx_buf[0] == MODBUS_SLAVE_ID) {
-      uint16_t crc_calc = modbus_crc(slave->rx_buf, slave->rx_idx - 2);
-      uint16_t crc_rx = slave->rx_buf[slave->rx_idx - 2] | (slave->rx_buf[slave->rx_idx - 1] << 8);
-      
-      if (crc_calc == crc_rx) {
-        uint8_t func = slave->rx_buf[1];
-        uint16_t addr = (slave->rx_buf[2] << 8) | slave->rx_buf[3];
-        uint16_t val = (slave->rx_buf[4] << 8) | slave->rx_buf[5];
-
-        if (func == 0x03) { // Read Holding Registers
-          if (addr + val <= slave->reg_count) {
-            uint16_t res_len = 3;
-            slave->rx_buf[2] = val * 2;
-            for (uint16_t i = 0; i < val; i++) {
-              slave->rx_buf[res_len++] = (slave->registers[addr + i] >> 8) & 0xFF;
-              slave->rx_buf[res_len++] = slave->registers[addr + i] & 0xFF;
+          if (func == 0x03) { // Read Holding Registers
+            if (addr + val <= MODBUS_REG_COUNT) {
+              uint16_t res_len = 3;
+              slave->rx_buf[2] = val * 2;
+              for (uint16_t i = 0; i < val; i++) {
+                slave->rx_buf[res_len++] = (slave->registers[addr + i] >> 8) & 0xFF;
+                slave->rx_buf[res_len++] = slave->registers[addr + i] & 0xFF;
+              }
+              modbus_send_response(slave, res_len);
             }
-            modbus_send_response(slave, res_len);
-          }
-        } else if (func == 0x06) { // Write Single Register
-          if (addr < slave->reg_count) {
-            slave->registers[addr] = val;
-            modbus_send_response(slave, 6);
+          } else if (func == 0x06) { // Write Single Register
+            if (addr < MODBUS_REG_COUNT) {
+              slave->registers[addr] = val;
+              modbus_send_response(slave, 6);
+            }
           }
         }
       }
     }
-    slave->rx_idx = 0;
+    
+    // Restart DMA for next frame
+    HAL_UARTEx_ReceiveToIdle_DMA(slave->huart, slave->rx_buf, MODBUS_BUF_SIZE);
   }
 }

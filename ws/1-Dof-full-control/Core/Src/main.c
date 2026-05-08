@@ -42,30 +42,59 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim3;
+IWDG_HandleTypeDef hiwdg;
 
 UART_HandleTypeDef hlpuart1;
 UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_lpuart1_rx;
+DMA_HandleTypeDef hdma_lpuart1_tx;
 DMA_HandleTypeDef hdma_usart3_rx;
+
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim7;
 
 /* USER CODE BEGIN PV */
 uint8_t joy_dma_buf[PKT_LEN * 2];
-uint16_t mb_regs[10] = {0};
 ModbusSlave_t mb_slave;
+
+typedef enum {
+  STATE_INIT,
+  STATE_IDLE,
+  STATE_CALIBRATE,
+  STATE_MANUAL,
+  STATE_AUTO,
+  STATE_EMER
+} RobotState_t;
+
+RobotState_t current_state = STATE_INIT;
+
+// Motor & PID Globals (For Control Team)
+float motor_speed_cmd = 0.0f; // -1.0 to 1.0
+int32_t current_position = 0;
+uint16_t current_sensor_val = 0;
+
+// Power Latch Timer
+uint32_t power_btn_hold_ms = 0;
+
+// UI Sub-loop Counter
+uint8_t sub_loop_counter = 0;
+volatile uint8_t flag_10ms = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
+static void MX_IWDG_Init(void);
 static void MX_LPUART1_UART_Init(void);
-static void MX_USART3_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_ADC1_Init(void);
+static void MX_TIM7_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -96,6 +125,10 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
     HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
     __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
+  }
+  if (huart->Instance == LPUART1)
+  {
+    modbus_rx_cplt(&mb_slave, Size);
   }
 }
 /* USER CODE END 0 */
@@ -130,23 +163,39 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  MX_IWDG_Init();
   MX_LPUART1_UART_Init();
-  MX_USART3_UART_Init();
   MX_TIM1_Init();
   MX_TIM3_Init();
-  MX_ADC1_Init();
+  MX_TIM7_Init();
+  MX_USART3_UART_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
   joystick_init(&huart3);
   HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
   __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
 
-  modbus_init(&mb_slave, &hlpuart1, mb_regs, 10);
+  modbus_init(&mb_slave, &hlpuart1);
 
   HAL_TIM_Encoder_Start(&htim1, TIM_CHANNEL_ALL);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   
+  // Start the 1kHz Control Loop
+  HAL_TIM_Base_Start_IT(&htim7);
+  
   // Latch Power On
   HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);
+  
+  // Refresh Watchdog
+  HAL_IWDG_Refresh(&hiwdg);
+  
+  current_state = STATE_IDLE;
+  mb_slave.registers[0x00] = 22881; // Initialize Heartbeat (YA)
+  
+  // Calibrate ADC2 before using it
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+  
+  printf("\r\n=== 1-DOF Robot System Ready ===\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -156,73 +205,161 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    modbus_update(&mb_slave);
-
-    // --- Control Logic ---
-    float motor_speed = 0.0f;
-    uint8_t ctrl_active = 0;
-
-    if (joy_is_connected()) {
-      motor_speed = joy_ly_f();
-      ctrl_active = 1;
+    if (flag_10ms) {
+      flag_10ms = 0;
       
-      // Manual Relay Control via Buttons
-      if (joy_btn(BTN_A)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
-      if (joy_btn(BTN_B)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
-      if (joy_btn(BTN_X)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
-      if (joy_btn(BTN_Y)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
-    } else {
-      // Modbus Control (Fallback)
-      // motor_speed = (float)((int16_t)mb_regs[1]) / 1000.0f; 
-    }
+      // 1. Read ADC Current Sensor (with Moving Average Filter)
+      if (HAL_ADC_Start(&hadc2) == HAL_OK) {
+        if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
+          uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
+          static float filtered_adc = 0;
+          if (filtered_adc == 0) filtered_adc = raw_adc;
+          filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
+          current_sensor_val = (uint16_t)filtered_adc;
+        }
+      }
 
-    // --- Safety Checks ---
-    if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
-      motor_speed = 0;
-      HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_SET);
-    } else {
-      HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_RESET);
-    }
+      // 2. Process incoming Modbus frames
+      modbus_process(&mb_slave);
 
-    // --- Apply Motor Output ---
-    if (motor_speed >= 0) {
-      HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
-    } else {
-      HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
-      motor_speed = -motor_speed;
-    }
-    if (motor_speed > 1.0f) motor_speed = 1.0f;
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(motor_speed * 1000.0f));
+      // 3. Update Status Registers (0x26 - 0x31)
+      mb_slave.registers[0x26] = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port, REED_UP_Pin) == GPIO_PIN_RESET ? 1 : 0) |
+                                 (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == GPIO_PIN_RESET ? 2 : 0) |
+                                 (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == GPIO_PIN_RESET ? 4 : 0);
+      
+      mb_slave.registers[0x28] = (uint16_t)current_position; 
+      mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) ? 1 : 0;
+      mb_slave.registers[0x04] = current_sensor_val; // Save filtered ADC to Modbus
+      
+      // Heartbeat Logic
+      static uint32_t hb_timer = 0;
+      hb_timer++;
+      if (mb_slave.registers[0x00] == 18537) {
+        // UI replied HI
+        hb_timer = 0;
+        mb_slave.registers[0x00] = 22881; // Ask YA again
+      } else if (hb_timer > 300) { // 3 seconds timeout
+        // UI is disconnected
+        // Handle disconnection if needed
+      }
 
-    // --- Apply Modbus Relay Control ---
-    // mb_regs[3]: bit0=Pneu, bit1=Grip, bit2=TowG, bit3=TowY, bit4=TowR
-    HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, (mb_regs[3] & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, (mb_regs[3] & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, (mb_regs[3] & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, (mb_regs[3] & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    // HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, (mb_regs[3] & 0x10) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      // 4. Execute State Machine
+      switch (current_state) {
+        case STATE_IDLE:
+          mb_slave.registers[0x27] = 0; // Idle
+          motor_speed_cmd = 0.0f;
+          
+          if (joy_is_connected() && joy_btn(BTN_L3) && joy_btn(BTN_R3)) {
+            current_state = STATE_EMER;
+          } else if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_X)) {
+            current_state = STATE_CALIBRATE;
+          } else if (joy_is_connected() && joy_rt_f() > 0.5f && (joy_ly_f() > 0.1f || joy_ly_f() < -0.1f)) {
+            current_state = STATE_MANUAL;
+          }
+          
+          // Modbus command overrides
+          if (mb_slave.registers[0x01] & 0x01) { current_state = STATE_CALIBRATE; mb_slave.registers[0x01] = 0; }
+          else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL; mb_slave.registers[0x01] = 0; }
+          else if (mb_slave.registers[0x01] & 0x04) { current_state = STATE_AUTO; mb_slave.registers[0x01] = 0; }
+          break;
+          
+        case STATE_CALIBRATE:
+          mb_slave.registers[0x27] = 1; // Homing
+          motor_speed_cmd = 0.1f; // Slow movement to find home
+          if (joy_is_connected() && joy_btn(BTN_LB)) {
+            current_state = STATE_EMER;
+          }
+          // Note: Exiting this state is handled by EXTI callback on HOME_Pin
+          break;
+          
+        case STATE_MANUAL:
+          mb_slave.registers[0x27] = 0; // Idle/Manual
+          if (joy_is_connected()) {
+            if (joy_btn(BTN_LB)) current_state = STATE_EMER;
+            if (joy_btn(BTN_X)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
+            if (joy_btn(BTN_Y)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
+            if (joy_btn(BTN_A)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Pick
+            if (joy_btn(BTN_B)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Place
+            
+            if (joy_rt_f() > 0.5f) {
+              motor_speed_cmd = joy_ly_f(); // Deadband is applied inside joy_ly_f
+            } else {
+              motor_speed_cmd = 0.0f;
+              if (joy_ly_f() == 0.0f) current_state = STATE_IDLE; 
+            }
+          } else {
+            // Check Modbus Jog
+            int16_t jog_cmd = (int16_t)mb_slave.registers[0x05];
+            if (jog_cmd != 0) {
+              // Execute jog logic here (Control team will add)
+              mb_slave.registers[0x05] = 0; // Clear command
+            } else if ((mb_slave.registers[0x01] & 0x02) == 0) {
+               current_state = STATE_IDLE; // Exit manual if flag cleared
+            }
+          }
+          break;
+          
+        case STATE_AUTO:
+          mb_slave.registers[0x27] = 8; // P2P Task running
+          if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+          if (mb_slave.registers[0x25] & 0x01) {
+            current_state = STATE_IDLE; // Soft stop
+            mb_slave.registers[0x25] = 0;
+          }
+          break;
+          
+        case STATE_EMER:
+          mb_slave.registers[0x27] = 0;
+          motor_speed_cmd = 0.0f;
+          HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_SET); // Red Tower Light on PC0
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // EMER_OUTPUT on PB6
+          
+          if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) {
+            if ((joy_is_connected() && joy_btn(BTN_BACK)) || (mb_slave.registers[0x01] == 0xFF)) {
+              current_state = STATE_IDLE;
+              mb_slave.registers[0x01] = 0;
+              HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_RESET);
+              HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET); 
+            }
+          }
+          break;
+          
+        default:
+          current_state = STATE_IDLE;
+          break;
+      }
+      
+      // 5. Apply Modbus Relay Control (if not controlled by Joystick)
+      if (!joy_is_connected()) {
+        HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, (mb_slave.registers[0x03] & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, (mb_slave.registers[0x03] & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, (mb_slave.registers[0x03] & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, (mb_slave.registers[0x03] & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      }
+      
+      // 6. Apply Motor Command (To Cytron)
+      float safe_speed = motor_speed_cmd;
+      if (current_state == STATE_EMER || current_state == STATE_IDLE) safe_speed = 0.0f;
+      
+      if (safe_speed >= 0) {
+        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
+      } else {
+        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
+        safe_speed = -safe_speed;
+      }
+      if (safe_speed > 1.0f) safe_speed = 1.0f;
+      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * 8499.0f));
 
-    // --- Update Modbus Registers ---
-    mb_regs[0] = (joy_is_connected() ? 0x01 : 0) | 
-                 (HAL_GPIO_ReadPin(HOME_GPIO_Port, HOME_Pin) == GPIO_PIN_RESET ? 0x02 : 0) |
-                 (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET ? 0x04 : 0);
-    mb_regs[1] = (uint16_t)(motor_speed * 1000.0f);
-    mb_regs[2] = (uint16_t)__HAL_TIM_GET_COUNTER(&htim1);
-    
-    // Read Current Sensor
-    HAL_ADC_Start(&hadc1);
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-      mb_regs[4] = (uint16_t)HAL_ADC_GetValue(&hadc1);
+      // Refresh IWDG
+      HAL_IWDG_Refresh(&hiwdg);
+      
+      // Heartbeat LED
+      static uint32_t last_hb = 0;
+      if (++last_hb > 50) { // 500ms at 100Hz
+        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+        last_hb = 0;
+      }
     }
-
-    // Activity Indicator
-    static uint32_t last_hb = 0;
-    if (HAL_GetTick() - last_hb > 500) {
-      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-      last_hb = HAL_GetTick();
-    }
-    
-    HAL_Delay(5);
   }
   /* USER CODE END 3 */
 }
@@ -243,9 +380,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
@@ -274,94 +412,113 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
+  * @brief ADC2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_GPIO_Init(void)
+static void MX_ADC2_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOF_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
+  /* USER CODE BEGIN ADC2_Init 0 */
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, MOTOR_DIR_Pin|LD2_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, TOWER_Y_Pin|GRIPPER_Pin|RESET_LED_Pin|POWER_LATCH_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOC, TOWER_G_Pin|TOWER_R_Pin|PNEUMATIC_Pin, GPIO_PIN_RESET);
+  /* USER CODE END ADC2_Init 0 */
 
-  /*Configure GPIO pin : MOTOR_DIR_Pin */
-  GPIO_InitStruct.Pin = MOTOR_DIR_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(MOTOR_DIR_GPIO_Port, &GPIO_InitStruct);
+  ADC_ChannelConfTypeDef sConfig = {0};
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  /* USER CODE BEGIN ADC2_Init 1 */
 
-  /*Configure GPIO pins : ESTOP_Pin HOME_Pin RESET_BTN_Pin POWER_BTN_Pin */
-  GPIO_InitStruct.Pin = ESTOP_Pin|HOME_Pin|RESET_BTN_Pin|POWER_BTN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* USER CODE END ADC2_Init 1 */
 
-  /*Configure GPIO pin : MODE_BTN_Pin */
-  GPIO_InitStruct.Pin = MODE_BTN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(MODE_BTN_GPIO_Port, &GPIO_InitStruct);
+  /** Common config
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.GainCompensation = 0;
+  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.LowPowerAutoWait = DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc2.Init.OversamplingMode = DISABLE;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  /*Configure GPIO pins : TOWER_G_Pin TOWER_R_Pin PNEUMATIC_Pin */
-  GPIO_InitStruct.Pin = TOWER_G_Pin|TOWER_R_Pin|PNEUMATIC_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_11;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
 
-  /*Configure GPIO pins : TOWER_Y_Pin GRIPPER_Pin RESET_LED_Pin POWER_LATCH_Pin */
-  GPIO_InitStruct.Pin = TOWER_Y_Pin|GRIPPER_Pin|RESET_LED_Pin|POWER_LATCH_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* USER CODE END ADC2_Init 2 */
 
-  /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
-  GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : REED_GRIP_Pin */
-  GPIO_InitStruct.Pin = REED_GRIP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(REED_GRIP_GPIO_Port, &GPIO_InitStruct);
 }
 
-static void MX_DMA_Init(void)
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
 {
-  __HAL_RCC_DMAMUX1_CLK_ENABLE();
-  __HAL_RCC_DMA1_CLK_ENABLE();
 
-  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
+  hiwdg.Init.Window = 4095;
+  hiwdg.Init.Reload = 4095;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
 }
 
+/**
+  * @brief LPUART1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_LPUART1_UART_Init(void)
 {
+
+  /* USER CODE BEGIN LPUART1_Init 0 */
+
+  /* USER CODE END LPUART1_Init 0 */
+
+  /* USER CODE BEGIN LPUART1_Init 1 */
+
+  /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.BaudRate = 19200;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Parity = UART_PARITY_EVEN;
   hlpuart1.Init.Mode = UART_MODE_TX_RX;
   hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -371,10 +528,39 @@ static void MX_LPUART1_UART_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN LPUART1_Init 2 */
+
+  /* USER CODE END LPUART1_Init 2 */
+
 }
 
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART3_UART_Init(void)
 {
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
   huart3.Init.BaudRate = 460800;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
@@ -390,13 +576,42 @@ static void MX_USART3_UART_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
 }
 
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM1_Init(void)
 {
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
   TIM_Encoder_InitTypeDef sConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -404,7 +619,7 @@ static void MX_TIM1_Init(void)
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
@@ -424,17 +639,34 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
 }
 
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM3_Init(void)
 {
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 169; // 170MHz / 170 = 1MHz
+  htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 999;     // 1MHz / 1000 = 1kHz PWM
+  htim3.Init.Period = 65535;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
@@ -455,55 +687,227 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
 }
 
-static void MX_ADC1_Init(void)
+/**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
 {
-  ADC_MultiModeTypeDef multimode = {0};
-  ADC_ChannelConfTypeDef sConfig = {0};
 
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.GainCompensation = 0;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.OversamplingMode = DISABLE;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 169;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 999;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
     Error_Handler();
   }
-
-  multimode.Mode = ADC_MODE_INDEPENDENT;
-  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM7_Init 2 */
 
-  sConfig.Channel = ADC_CHANNEL_11; // PC5 is ADC1_IN11
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
-  sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* USER CODE END TIM7_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, TOWER_R_Pin|PNEUMATIC_Pin|TOWER_G_Pin|GPIO_PIN_8, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, MOTOR_DIR_Pin|LD2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GRIPPER_Pin|POWER_LATCH_Pin|RESET_LED_Pin|EMER_OUTPUT_Pin
+                          |TOWER_Y_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : TOWER_R_Pin PNEUMATIC_Pin TOWER_G_Pin PC8 */
+  GPIO_InitStruct.Pin = TOWER_R_Pin|PNEUMATIC_Pin|TOWER_G_Pin|GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
+  GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : MOTOR_DIR_Pin LD2_Pin */
+  GPIO_InitStruct.Pin = MOTOR_DIR_Pin|LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : REED_GRIP_Pin RESET_BTN_Pin POWER_BTN_Pin */
+  GPIO_InitStruct.Pin = REED_GRIP_Pin|RESET_BTN_Pin|POWER_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : GRIPPER_Pin POWER_LATCH_Pin RESET_LED_Pin EMER_OUTPUT_Pin
+                           TOWER_Y_Pin */
+  GPIO_InitStruct.Pin = GRIPPER_Pin|POWER_LATCH_Pin|RESET_LED_Pin|EMER_OUTPUT_Pin
+                          |TOWER_Y_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ESTOP_Pin */
+  GPIO_InitStruct.Pin = ESTOP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(ESTOP_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : HOME_Pin */
+  GPIO_InitStruct.Pin = HOME_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(HOME_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == ESTOP_Pin) {
+    // E-Stop Triggered (Falling Edge)
+    if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
+      current_state = STATE_EMER;
+      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // Force PWM to 0 immediately
+      HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // Set EMER_OUTPUT instead of TOWER_R
+    }
+  }
+  if (GPIO_Pin == HOME_Pin) {
+    // Home Sensor Triggered
+    if (current_state == STATE_CALIBRATE) {
+      __HAL_TIM_SET_COUNTER(&htim1, 0); // Reset Encoder
+      current_state = STATE_IDLE;
+      motor_speed_cmd = 0.0f;
+    }
+  }
+}
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+  if (htim->Instance == TIM7) {
+    // 1kHz Loop
+    current_position = (int32_t)__HAL_TIM_GET_COUNTER(&htim1);
+    
+    // Poll Power Button
+    if (HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin) == GPIO_PIN_RESET) {
+      power_btn_hold_ms++;
+      if (power_btn_hold_ms >= 3000) {
+        HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET); // Shutdown
+      }
+    } else {
+      power_btn_hold_ms = 0;
+    }
+
+    // Software Receiver Timeout for Modbus
+    modbus_tick_1ms(&mb_slave);
+
+    // 100Hz Sub-loop trigger
+    sub_loop_counter++;
+    if (sub_loop_counter >= 10) {
+      sub_loop_counter = 0;
+      flag_10ms = 1;
+    }
+  }
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
