@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\main.c\" -Encoding UTF8; $total = $lines.Count; Write-Host \"Total lines: $total\"; $lines | Select-String \"MX_TIM3\\\\|htim3.Instance\\\\|MX_TIM1\\\\|MX_TIM7\" | Select-Object LineNumber, Line)",
+      "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\main.c\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"htim3\\\\.Instance|MX_TIM3|htim3\\\\.Init\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})",
+      "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\stm32g4xx_hal_msp.c\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"MspPostInit|HAL_TIM_PWM_Msp|TIM_PWM|HAL_TIM_Base_Msp|TIM7|TIM3|TIM_Encoder\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})",
+      "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\main.h\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"MspPostInit|TIM3|TIM_PWM\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})"
+    ]
+  }
+}

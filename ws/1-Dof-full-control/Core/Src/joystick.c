@@ -59,3 +59,7 @@ float joy_rt_f(void) { return joy_rt() / 255.0f; }
 uint8_t joy_btn(uint16_t mask) {
   return joy_is_connected() ? ((joy.buttons & mask) != 0) : 0;
 }
+
+uint16_t joy_raw_buttons(void) {
+  return joy_is_connected() ? joy.buttons : 0;
+}

@@ -47,5 +47,6 @@ uint8_t joy_rt(void);
 float joy_lt_f(void);
 float joy_rt_f(void);
 uint8_t joy_btn(uint16_t mask);
+uint16_t joy_raw_buttons(void);
 
 #endif /* __JOYSTICK_H */

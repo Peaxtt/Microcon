@@ -82,6 +82,86 @@ uint32_t power_btn_hold_ms = 0;
 // UI Sub-loop Counter
 uint8_t sub_loop_counter = 0;
 volatile uint8_t flag_10ms = 0;
+
+// --- Live Expressions Dashboard & UI Testing ---
+typedef enum {
+  SYS_MODE_PRODUCTION = 0,
+  SYS_MODE_HARDWARE_TEST = 1,
+  SYS_MODE_JOYSTICK_TEST = 2,
+  SYS_MODE_AUTO_MOTOR_TEST = 3
+} SystemMode_t;
+
+typedef struct {
+  SystemMode_t mode;
+  uint8_t  force_pneumatic;
+  uint8_t  force_gripper;
+  uint8_t  force_tower_green;
+  uint8_t  force_tower_yellow;
+  uint8_t  force_tower_red;
+  uint8_t  force_emer_out;
+  float    force_motor_speed;
+  // Motor tuning (ปรับ real-time ผ่าน Live Expressions)
+  float    ramp_rate;      // slew rate /10ms: 0.01=slow 0.1=fast
+  float    max_speed;      // hard cap 0.0-1.0
+  // Mode 3: Auto Motor Test
+  float    auto_speed;     // speed 0.0-1.0
+  uint16_t auto_period_ms; // ms ต่อทิศ
+  // Current sensor calibration (WCS1800)
+  float    cur_zero_v;     // voltage ที่ 0A (วัดจาก multimeter ตอนไม่มีกระแส)
+  float    cur_sens;       // sensitivity V/A (0.066 = 66mV/A)
+} DashCtrl_t;
+
+typedef struct {
+  uint8_t  connected;
+  uint16_t raw_buttons;
+  float    L_Y;
+  float    R_T;
+  float    L_T;
+} DashJoy_t;
+
+typedef struct {
+  RobotState_t state;
+  float    motor_cmd;
+  int32_t  encoder;
+  uint16_t current_mA;
+} DashStatus_t;
+
+typedef struct {
+  uint8_t  estop;
+  uint8_t  mode_switch;
+  uint8_t  reset;
+  uint8_t  power;
+} DashIn_t;
+
+typedef struct {
+  uint8_t  pwm;
+  uint8_t  dir;
+  uint8_t  pneumatic;
+  uint8_t  gripper;
+  uint8_t  tower_g;
+  uint8_t  tower_y;
+  uint8_t  tower_r;
+  uint8_t  reset_led;
+  uint8_t  emer;
+} DashOut_t;
+
+typedef struct {
+  DashCtrl_t   Ctrl;
+  DashJoy_t    Joy;
+  DashStatus_t Status;
+  DashIn_t     In;
+  DashOut_t    Out;
+} DevDashboard_t;
+
+DevDashboard_t dev_dash = {
+  .Ctrl.mode          = SYS_MODE_PRODUCTION,
+  .Ctrl.ramp_rate     = 0.03f,
+  .Ctrl.max_speed     = 0.40f,
+  .Ctrl.auto_speed    = 0.30f,
+  .Ctrl.auto_period_ms= 1000,
+  .Ctrl.cur_zero_v    = 1.65f,  // ← วัด multimeter ที่ PC5 ตอน 0A แล้วใส่ค่าจริง
+  .Ctrl.cur_sens      = 0.066f, // 66mV/A สำหรับ WCS1800
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -91,10 +171,10 @@ static void MX_DMA_Init(void);
 static void MX_IWDG_Init(void);
 static void MX_LPUART1_UART_Init(void);
 static void MX_TIM1_Init(void);
-static void MX_TIM3_Init(void);
 static void MX_TIM7_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_ADC2_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -166,10 +246,10 @@ int main(void)
   MX_IWDG_Init();
   MX_LPUART1_UART_Init();
   MX_TIM1_Init();
-  MX_TIM3_Init();
   MX_TIM7_Init();
   MX_USART3_UART_Init();
   MX_ADC2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   joystick_init(&huart3);
   HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
@@ -183,8 +263,8 @@ int main(void)
   // Start the 1kHz Control Loop
   HAL_TIM_Base_Start_IT(&htim7);
   
-  // Latch Power On
-  HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);
+  // Latch Power On (Commented out as PB14 is now TOWER_R)
+  // HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);
   
   // Refresh Watchdog
   HAL_IWDG_Refresh(&hiwdg);
@@ -215,7 +295,11 @@ int main(void)
           static float filtered_adc = 0;
           if (filtered_adc == 0) filtered_adc = raw_adc;
           filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
-          current_sensor_val = (uint16_t)filtered_adc;
+          // WCS1800: ปรับ cur_zero_v และ cur_sens ใน dev_dash.Ctrl ได้ real-time
+          float v = (filtered_adc / 4095.0f) * 3.3f;
+          float i_a = (v - dev_dash.Ctrl.cur_zero_v) / dev_dash.Ctrl.cur_sens;
+          if (i_a < 0.0f) i_a = -i_a;
+          current_sensor_val = (uint16_t)(i_a * 1000.0f); // mA
         }
       }
 
@@ -243,112 +327,253 @@ int main(void)
         // Handle disconnection if needed
       }
 
-      // 4. Execute State Machine
-      switch (current_state) {
-        case STATE_IDLE:
-          mb_slave.registers[0x27] = 0; // Idle
-          motor_speed_cmd = 0.0f;
+      // Handle Hardware Selector Switch (Auto/Manual on MODE_Pin)
+      static GPIO_PinState last_mode_switch = GPIO_PIN_RESET;
+      GPIO_PinState current_mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
+      
+      if (current_mode_switch != last_mode_switch) {
+        if (current_state != STATE_EMER && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+          // Default assumption: SET (High) = AUTO, RESET (Low) = MANUAL.
+          current_state = (current_mode_switch == GPIO_PIN_SET) ? STATE_AUTO : STATE_MANUAL;
+        }
+        last_mode_switch = current_mode_switch;
+      }
+
+      // 4. System Mode Selector (Production vs Hardware Test UI)
+      float safe_speed = 0.0f;
+
+      if (dev_dash.Ctrl.mode == SYS_MODE_HARDWARE_TEST) {
+        
+        // --- HARDWARE TEST UI MODE ---
+        // Bypass State Machine and Modbus commands completely.
+        // Apply physical outputs directly from the Live Expressions variables.
+        
+        HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, dev_dash.Ctrl.force_pneumatic ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, dev_dash.Ctrl.force_gripper ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Ctrl.force_tower_green ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Ctrl.force_tower_yellow ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Ctrl.force_tower_red ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Ctrl.force_emer_out ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        
+        // Apply Forced Motor Speed
+        safe_speed = dev_dash.Ctrl.force_motor_speed;
+        if (safe_speed > 1.0f) safe_speed = 1.0f;
+        if (safe_speed < -1.0f) safe_speed = -1.0f;
+        
+        if (safe_speed >= 0) {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
+        } else {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
+          safe_speed = -safe_speed;
+        }
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+
+      } else if (dev_dash.Ctrl.mode == SYS_MODE_JOYSTICK_TEST) {
+        
+        // --- JOYSTICK HARDWARE TEST MODE ---
+        // Bypass State Machine. Map joystick buttons directly to physical pins for fast testing.
+        if (joy_is_connected()) {
+          HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, joy_btn(BTN_Y) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, joy_btn(BTN_B) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, joy_btn(BTN_X) ? GPIO_PIN_SET : GPIO_PIN_RESET);
           
-          if (joy_is_connected() && joy_btn(BTN_L3) && joy_btn(BTN_R3)) {
-            current_state = STATE_EMER;
-          } else if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_X)) {
-            current_state = STATE_CALIBRATE;
-          } else if (joy_is_connected() && joy_rt_f() > 0.5f && (joy_ly_f() > 0.1f || joy_ly_f() < -0.1f)) {
-            current_state = STATE_MANUAL;
-          }
+          HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, joy_btn(BTN_DPAD_UP) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, joy_btn(BTN_DPAD_DOWN) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, joy_btn(BTN_DPAD_LEFT) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, joy_btn(BTN_DPAD_RIGHT) ? GPIO_PIN_SET : GPIO_PIN_RESET);
           
-          // Modbus command overrides
-          if (mb_slave.registers[0x01] & 0x01) { current_state = STATE_CALIBRATE; mb_slave.registers[0x01] = 0; }
-          else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL; mb_slave.registers[0x01] = 0; }
-          else if (mb_slave.registers[0x01] & 0x04) { current_state = STATE_AUTO; mb_slave.registers[0x01] = 0; }
-          break;
-          
-        case STATE_CALIBRATE:
-          mb_slave.registers[0x27] = 1; // Homing
-          motor_speed_cmd = 0.1f; // Slow movement to find home
-          if (joy_is_connected() && joy_btn(BTN_LB)) {
-            current_state = STATE_EMER;
-          }
-          // Note: Exiting this state is handled by EXTI callback on HOME_Pin
-          break;
-          
-        case STATE_MANUAL:
-          mb_slave.registers[0x27] = 0; // Idle/Manual
-          if (joy_is_connected()) {
-            if (joy_btn(BTN_LB)) current_state = STATE_EMER;
-            if (joy_btn(BTN_X)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
-            if (joy_btn(BTN_Y)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
-            if (joy_btn(BTN_A)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Pick
-            if (joy_btn(BTN_B)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Place
-            
-            if (joy_rt_f() > 0.5f) {
-              motor_speed_cmd = joy_ly_f(); // Deadband is applied inside joy_ly_f
-            } else {
-              motor_speed_cmd = 0.0f;
-              if (joy_ly_f() == 0.0f) current_state = STATE_IDLE; 
-            }
+          float joy_raw = (joy_rt_f() > 0.5f) ? joy_ly_f() : 0.0f;
+          float joy_target = (joy_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
+                             (joy_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : joy_raw;
+          static float joy_ramp = 0.0f;
+          float ramp_rate_local = dev_dash.Ctrl.ramp_rate;
+          if      (joy_target > joy_ramp + ramp_rate_local) joy_ramp += ramp_rate_local;
+          else if (joy_target < joy_ramp - ramp_rate_local) joy_ramp -= ramp_rate_local;
+          else                                               joy_ramp  = joy_target;
+          safe_speed = joy_ramp;
+
+          if (safe_speed >= 0) {
+            HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
           } else {
-            // Check Modbus Jog
-            int16_t jog_cmd = (int16_t)mb_slave.registers[0x05];
-            if (jog_cmd != 0) {
-              // Execute jog logic here (Control team will add)
-              mb_slave.registers[0x05] = 0; // Clear command
-            } else if ((mb_slave.registers[0x01] & 0x02) == 0) {
-               current_state = STATE_IDLE; // Exit manual if flag cleared
-            }
+            HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
+            safe_speed = -safe_speed;
           }
-          break;
-          
-        case STATE_AUTO:
-          mb_slave.registers[0x27] = 8; // P2P Task running
-          if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
-          if (mb_slave.registers[0x25] & 0x01) {
-            current_state = STATE_IDLE; // Soft stop
-            mb_slave.registers[0x25] = 0;
-          }
-          break;
-          
-        case STATE_EMER:
-          mb_slave.registers[0x27] = 0;
-          motor_speed_cmd = 0.0f;
-          HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_SET); // Red Tower Light on PC0
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // EMER_OUTPUT on PB6
-          
-          if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) {
-            if ((joy_is_connected() && joy_btn(BTN_BACK)) || (mb_slave.registers[0x01] == 0xFF)) {
-              current_state = STATE_IDLE;
-              mb_slave.registers[0x01] = 0;
-              HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_RESET);
-              HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET); 
-            }
-          }
-          break;
-          
-        default:
-          current_state = STATE_IDLE;
-          break;
-      }
-      
-      // 5. Apply Modbus Relay Control (if not controlled by Joystick)
-      if (!joy_is_connected()) {
-        HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, (mb_slave.registers[0x03] & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, (mb_slave.registers[0x03] & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, (mb_slave.registers[0x03] & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, (mb_slave.registers[0x03] & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-      }
-      
-      // 6. Apply Motor Command (To Cytron)
-      float safe_speed = motor_speed_cmd;
-      if (current_state == STATE_EMER || current_state == STATE_IDLE) safe_speed = 0.0f;
-      
-      if (safe_speed >= 0) {
-        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
+          if (safe_speed > 1.0f) safe_speed = 1.0f;
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+        } else {
+          // Safe state if joystick disconnects during test
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+          HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+        }
+
+      } else if (dev_dash.Ctrl.mode == SYS_MODE_AUTO_MOTOR_TEST) {
+
+        // --- AUTO MOTOR TEST MODE ---
+        static uint16_t auto_test_timer = 0;
+        static uint8_t  auto_test_dir   = 0;
+        uint16_t half_period = (dev_dash.Ctrl.auto_period_ms / 10);
+        if (half_period < 1) half_period = 1;
+        auto_test_timer++;
+        if (auto_test_timer >= half_period) {
+          auto_test_timer = 0;
+          auto_test_dir = !auto_test_dir;
+        }
+        safe_speed = dev_dash.Ctrl.auto_speed;
+        if (safe_speed > dev_dash.Ctrl.max_speed) safe_speed = dev_dash.Ctrl.max_speed;
+        if (safe_speed < 0.0f) safe_speed = 0.0f;
+        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin,
+                          auto_test_dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+
       } else {
-        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
-        safe_speed = -safe_speed;
-      }
-      if (safe_speed > 1.0f) safe_speed = 1.0f;
-      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * 8499.0f));
+
+        // --- NORMAL PRODUCTION MODE ---
+        // Execute State Machine
+        switch (current_state) {
+          case STATE_IDLE:
+            mb_slave.registers[0x27] = 0; // Idle
+            motor_speed_cmd = 0.0f;
+            
+            if (joy_is_connected() && joy_btn(BTN_L3) && joy_btn(BTN_R3)) {
+              current_state = STATE_EMER;
+            } else if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_X)) {
+              current_state = STATE_CALIBRATE;
+            } else if (joy_is_connected() && joy_rt_f() > 0.5f && (joy_ly_f() > 0.1f || joy_ly_f() < -0.1f)) {
+              current_state = STATE_MANUAL;
+            }
+            
+            // Modbus command overrides
+            if (mb_slave.registers[0x01] & 0x01) { current_state = STATE_CALIBRATE; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x04) { current_state = STATE_AUTO; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x10) { dev_dash.Ctrl.mode = SYS_MODE_HARDWARE_TEST; mb_slave.registers[0x01] = 0; } // Enter Test Mode via Modbus
+            break;
+            
+          case STATE_CALIBRATE:
+            mb_slave.registers[0x27] = 1; // Homing
+            motor_speed_cmd = 0.1f; // Slow movement to find home
+            if (joy_is_connected() && joy_btn(BTN_LB)) {
+              current_state = STATE_EMER;
+            }
+            // Note: Exiting this state is handled by EXTI callback on HOME_Pin
+            break;
+            
+          case STATE_MANUAL:
+            mb_slave.registers[0x27] = 0; // Idle/Manual
+            if (joy_is_connected()) {
+              if (joy_btn(BTN_LB)) current_state = STATE_EMER;
+              if (joy_btn(BTN_X)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
+              if (joy_btn(BTN_Y)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
+              if (joy_btn(BTN_A)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Pick
+              if (joy_btn(BTN_B)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Place
+              
+              if (joy_rt_f() > 0.5f) {
+                motor_speed_cmd = joy_ly_f(); // Deadband is applied inside joy_ly_f
+              } else {
+                motor_speed_cmd = 0.0f;
+                if (joy_ly_f() == 0.0f) current_state = STATE_IDLE; 
+              }
+            } else {
+              // Check Modbus Jog
+              int16_t jog_cmd = (int16_t)mb_slave.registers[0x05];
+              if (jog_cmd != 0) {
+                // Execute jog logic here (Control team will add)
+                mb_slave.registers[0x05] = 0; // Clear command
+              } else if ((mb_slave.registers[0x01] & 0x02) == 0) {
+                 current_state = STATE_IDLE; // Exit manual if flag cleared
+              }
+            }
+            break;
+            
+          case STATE_AUTO:
+            mb_slave.registers[0x27] = 8; // P2P Task running
+            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+            if (mb_slave.registers[0x25] & 0x01) {
+              current_state = STATE_IDLE; // Soft stop
+              mb_slave.registers[0x25] = 0;
+            }
+            break;
+            
+          case STATE_EMER:
+            mb_slave.registers[0x27] = 0;
+            motor_speed_cmd = 0.0f;
+            HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_SET); // Red Tower Light on PC0
+            HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // EMER_OUTPUT on PB6
+            
+            if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) {
+              if ((joy_is_connected() && joy_btn(BTN_BACK)) || (mb_slave.registers[0x01] == 0xFF)) {
+                current_state = STATE_IDLE;
+                mb_slave.registers[0x01] = 0;
+                HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, GPIO_PIN_RESET);
+                HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET); 
+              }
+            }
+            break;
+            
+          default:
+            current_state = STATE_IDLE;
+            break;
+        }
+        
+        // Apply Modbus Relay Control (if not controlled by Joystick)
+        if (!joy_is_connected()) {
+          HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, (mb_slave.registers[0x03] & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, (mb_slave.registers[0x03] & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, (mb_slave.registers[0x03] & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, (mb_slave.registers[0x03] & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        }
+        
+        // Apply Motor Command (To Cytron) with slew rate limiter
+        float prod_raw = motor_speed_cmd;
+        if (current_state == STATE_EMER || current_state == STATE_IDLE) prod_raw = 0.0f;
+        float prod_target = (prod_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
+                            (prod_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : prod_raw;
+        static float prod_ramp = 0.0f;
+        float prod_ramp_rate_local = dev_dash.Ctrl.ramp_rate;
+        if      (prod_target > prod_ramp + prod_ramp_rate_local) prod_ramp += prod_ramp_rate_local;
+        else if (prod_target < prod_ramp - prod_ramp_rate_local) prod_ramp -= prod_ramp_rate_local;
+        else                                                      prod_ramp  = prod_target;
+        safe_speed = prod_ramp;
+
+        if (safe_speed >= 0) {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
+        } else {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
+          safe_speed = -safe_speed;
+        }
+        if (safe_speed > 1.0f) safe_speed = 1.0f;
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+
+      } // End Normal Production Mode
+
+      // 7. Update Live Expressions Dashboard
+            dev_dash.Joy.connected = joy_is_connected();
+            dev_dash.Joy.raw_buttons   = joy_raw_buttons();
+            dev_dash.Joy.L_Y       = joy_ly_f();
+            dev_dash.Joy.R_T       = joy_rt_f();
+            dev_dash.Joy.L_T       = joy_lt_f();
+
+            dev_dash.Status.state         = current_state;
+            // Reconstruct actual signed motor command for dashboard
+            dev_dash.Status.motor_cmd     = (HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin) == GPIO_PIN_SET) ? safe_speed : -safe_speed;
+            dev_dash.Status.encoder       = current_position;
+            dev_dash.Status.current_mA    = current_sensor_val;
+
+            dev_dash.In.estop      = HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin);
+            dev_dash.In.mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
+            dev_dash.In.reset      = HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin);
+            dev_dash.In.power      = HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin);
+
+            dev_dash.Out.pwm       = (safe_speed > 0.0f || safe_speed < 0.0f) ? 1 : 0;
+            dev_dash.Out.dir       = HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin);
+            dev_dash.Out.pneumatic = HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin);
+            dev_dash.Out.gripper   = HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin);
+            dev_dash.Out.tower_g   = HAL_GPIO_ReadPin(TOWER_G_GPIO_Port, TOWER_G_Pin);
+            dev_dash.Out.tower_y   = HAL_GPIO_ReadPin(TOWER_Y_GPIO_Port, TOWER_Y_Pin);
+            dev_dash.Out.tower_r   = HAL_GPIO_ReadPin(TOWER_R_GPIO_Port, TOWER_R_Pin);
+            dev_dash.Out.reset_led = HAL_GPIO_ReadPin(RESET_LED_GPIO_Port, RESET_LED_Pin);
+            dev_dash.Out.emer      = HAL_GPIO_ReadPin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin);
 
       // Refresh IWDG
       HAL_IWDG_Refresh(&hiwdg);
@@ -619,7 +844,7 @@ static void MX_TIM1_Init(void)
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
@@ -657,6 +882,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
@@ -666,9 +892,18 @@ static void MX_TIM3_Init(void)
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 65535;
+  htim3.Init.Period = 8499;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
@@ -774,33 +1009,26 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, TOWER_R_Pin|PNEUMATIC_Pin|TOWER_G_Pin|GPIO_PIN_8, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, MOTOR_DIR_Pin|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GRIPPER_Pin|POWER_LATCH_Pin|RESET_LED_Pin|EMER_OUTPUT_Pin
                           |TOWER_Y_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : TOWER_R_Pin PNEUMATIC_Pin TOWER_G_Pin PC8 */
-  GPIO_InitStruct.Pin = TOWER_R_Pin|PNEUMATIC_Pin|TOWER_G_Pin|GPIO_PIN_8;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
-  GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, PNEUMATIC_Pin|TOWER_G_Pin|TOWER_R_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : MOTOR_DIR_Pin LD2_Pin */
   GPIO_InitStruct.Pin = MOTOR_DIR_Pin|LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
+  GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : REED_GRIP_Pin RESET_BTN_Pin POWER_BTN_Pin */
@@ -824,11 +1052,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ESTOP_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : HOME_Pin */
-  GPIO_InitStruct.Pin = HOME_Pin;
+  /*Configure GPIO pin : PNEUMATIC_Pin */
+  GPIO_InitStruct.Pin = PNEUMATIC_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(PNEUMATIC_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : TOWER_G_Pin TOWER_R_Pin */
+  GPIO_InitStruct.Pin = TOWER_G_Pin|TOWER_R_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : MODE_Pin */
+  GPIO_InitStruct.Pin = MODE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(HOME_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(MODE_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
@@ -850,15 +1092,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
       current_state = STATE_EMER;
       __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // Force PWM to 0 immediately
-      HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // Set EMER_OUTPUT instead of TOWER_R
-    }
-  }
-  if (GPIO_Pin == HOME_Pin) {
-    // Home Sensor Triggered
-    if (current_state == STATE_CALIBRATE) {
-      __HAL_TIM_SET_COUNTER(&htim1, 0); // Reset Encoder
-      current_state = STATE_IDLE;
-      motor_speed_cmd = 0.0f;
+      HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET); // Set EMER_OUTPUT
     }
   }
 }
@@ -884,7 +1118,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 1 */
   if (htim->Instance == TIM7) {
     // 1kHz Loop
-    current_position = (int32_t)__HAL_TIM_GET_COUNTER(&htim1);
+    current_position = (int32_t)(int16_t)__HAL_TIM_GET_COUNTER(&htim1); // int16_t cast handles signed 16-bit wrap
     
     // Poll Power Button
     if (HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin) == GPIO_PIN_RESET) {
