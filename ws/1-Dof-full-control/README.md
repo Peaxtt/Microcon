@@ -1,420 +1,228 @@
-# Base System — How it works (FRA263 / FRA264)
+# 1-DOF Industrial Robot Control System
 
-This document describes the **Base System** application that runs on the PC: what it connects to, **how data moves**, and **what each Modbus register address means**. You use the program as provided; you do not need its internal source code to follow this guide.
-<!-- 
-For step-by-step connection checks and example messages, see **[`test.md`](test.md)**. -->
+> **STM32G474RETx** · Cytron MD20A · 24VDC / 750W · Modbus RTU + XInput Joystick
 
 ---
 
+## ภาพรวมระบบ
 
-## Prerequisites
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CONTROL CABINET                          │
+│                                                             │
+│  [PC — Base System UI]                                      │
+│       ↕  Modbus RTU  (LPUART1, 19200 8E1, Slave ID: 21)    │
+│  [STM32G474RE — Firmware]                                   │
+│       ├─ TIM7 @1kHz  → Encoder · Power Button · Modbus     │
+│       ├─ Loop @100Hz → ADC Current · State Machine · Motor  │
+│       ├─ EXTI        → E-Stop (PB13) · Mode Switch (PB5)   │
+│       └─ USART3      → Joystick XInput (460800 8N1)         │
+│              ↕ PWM 20kHz + DIR                              │
+│       [Cytron MD20A 20A] → [DC Motor + Encoder]            │
+│                                                             │
+│  Sensors: WCS1800 Current · Reed Up/Down/Grip              │
+│  Outputs: Tower Light · Pneumatic · Gripper · EMER         │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Before starting the installation, ensure you have the following software installed:
-
-* **Docker Desktop:** [Download here](https://www.docker.com)
+**สถานะปัจจุบัน**
+- ✅ Infrastructure (UART DMA, Timer, State Machine, Modbus, Joystick)
+- ✅ Motor: หมุน Forward/Reverse ผ่าน Joystick และ Auto Test
+- ✅ Current Sensor: WCS1800 บน PC4, หน่วย Amperes
+- ✅ Encoder: TI12 mode, absolute position tracking
+- ⬜ Homing / Calibrate: ยังไม่ implement (HOME sensor ยังไม่มีขา)
+- ⬜ PID Position Control: รอทีม Control
 
 ---
 
-## Installation Steps
+## อ่านอะไรก่อน — แล้วแต่ทีม
 
-Follow these steps to deploy both the Frontend and Backend services with a single command:
+### 🔧 ทีม Control (ใส่ PID / Homing)
+```
+1. README.md          ← อยู่นี่แล้ว — ภาพรวมและ key variables
+2. DEVELOPER_GUIDE.md ← Live Expressions, สิ่งที่ต้อง implement, การ tuning
+3. SOFTWARE_LOGIC.md  ← State machine ละเอียด, Motor pipeline, Modbus map
+4. HARDWARE_SETUP.md  ← Pin mapping ครบ, ถ้าต้องการ HOME sensor
+```
 
-### 1. Prepare Your Files
-Ensure the following 3 files are located in the same directory:
-1.  `frontend-image.tar` (The Web UI Image)
-2.  `docker-compose.yml` (The configuration file start the interface)
-3. `main.exe` (For connect to STM)
+### 🖥️ ทีม UI / Base System
+```
+1. README.md          ← ภาพรวม + Modbus map สรุป (ด้านล่าง)
+2. SOFTWARE_LOGIC.md  ← Modbus register map ครบถ้วน
+```
 
-### 2. Load Docker Images
-Open your Terminal or Command Prompt in that directory and run:
+### 🤖 AI / Developer คนถัดไป
+```
+1. docs/AI_HANDOFF_CONTEXT.md  ← อ่านอันเดียวได้ครบทุกอย่าง
+```
+
+### 🧪 ทีม Testing / Commissioning
+```
+1. README.md         ← ภาพรวม
+2. TESTING_GUIDE.md  ← ขั้นตอนทดสอบ Mode 1-3, Checklist
+```
+
+---
+
+## โครงสร้างไฟล์
+
+```
+1-Dof-full-control/
+│
+├── README.md                    ← คุณอยู่ที่นี่ — อ่านก่อน
+│
+├── 1-Dof-full-control.ioc       ← CubeMX config (source of truth pin mapping)
+│
+├── Core/
+│   ├── Inc/
+│   │   ├── main.h              ← Pin label defines ทั้งหมด
+│   │   └── joystick.h          ← Joystick API + button defines
+│   └── Src/
+│       ├── main.c              ← โค้ดหลัก: State Machine, Motor, ADC, Dashboard
+│       ├── joystick.c          ← Parse XInput 15-byte packet, deadzone
+│       ├── modbus.c            ← Modbus RTU slave, DMA, register R/W
+│       ├── stm32g4xx_hal_msp.c ← GPIO/Clock/DMA (CubeMX generated)
+│       └── stm32g4xx_it.c      ← Interrupt handlers (CubeMX generated)
+│
+└── docs/
+    ├── AI_HANDOFF_CONTEXT.md   ← Context ครบสำหรับ developer คนถัดไป
+    ├── HARDWARE_SETUP.md       ← Pinout ทุกขา, Timer, Power, Current Sensor
+    ├── SOFTWARE_LOGIC.md       ← State machine, Motor pipeline, Modbus map
+    ├── DEVELOPER_GUIDE.md      ← Live Expressions, Test modes, API variables
+    └── TESTING_GUIDE.md        ← ขั้นตอนทดสอบ, Calibration, Checklist
+```
+
+---
+
+## Key Variables (Control Team ใช้)
+
+```c
+// เขียน — สั่งความเร็วมอเตอร์
+extern float   motor_speed_cmd;    // -1.0 (full reverse) ถึง +1.0 (full forward)
+
+// อ่าน — ตำแหน่ง encoder (อัพเดทที่ 1kHz, ไม่ overflow)
+extern int32_t current_position;   // encoder counts, TI12 mode (4x resolution)
+
+// อ่าน — กระแสมอเตอร์ (อัพเดทที่ 100Hz)
+extern float   current_sensor_A;   // Amperes, float, ~4 decimal places
+```
+
+**Pipeline ที่ `motor_speed_cmd` ผ่านก่อนออก PWM จริง:**
+```
+motor_speed_cmd → [Max Speed Cap] → [Direction Dead-time 50ms] → [Slew Ramp] → PWM
+```
+ปรับ runtime ได้ผ่าน `dev_dash.Ctrl.max_speed` และ `dev_dash.Ctrl.ramp_rate`
+
+---
+
+## Live Expressions — เปิดทุกอย่างด้วย 1 expression
+
+```
+Flash ด้วย Debug (🐞) → Live Expressions → Add: dev_dash
+```
+
+```
+▼ dev_dash
+  ▼ Ctrl           ← ปรับ real-time ได้ทั้งหมด
+      mode                  0=Production · 1=HW Test · 2=Joy Test · 3=Auto Test
+      ramp_rate             0.03   (slew rate /10ms)
+      max_speed             0.40   (hard cap 0.0–1.0)
+      auto_speed            0.30   (speed ใน mode 3)
+      auto_period_fwd_ms    1000   (ms ทิศ Forward)
+      auto_period_rev_ms    1000   (ms ทิศ Reverse)
+      cur_zero_v            2.50   (zero-current voltage, วัดจาก multimeter)
+      cur_sens              0.066  (sensitivity V/A)
+      force_motor_speed     0.0    (ใช้ใน mode 1)
+      force_pneumatic/gripper/tower_*  (ใช้ใน mode 1)
+  ▼ Status         ← อ่าน real-time
+      state                 STATE_IDLE / MANUAL / AUTO / EMER
+      motor_cmd             speed จริงที่ออก (signed)
+      encoder               ตำแหน่ง encoder (int32)
+      current_A             กระแส (Amperes)
+  ▼ In             ← สถานะปุ่มและ switch
+      estop / mode_switch / reset / power
+  ▼ Out            ← สถานะ output จริง
+      pwm/dir/pneumatic/gripper/tower_g/y/r
+```
+
+---
+
+## Pin Mapping (สรุป)
+
+| Pin | Label | หน้าที่ |
+|-----|-------|--------|
+| **PA6** | MOTOR_PWM | TIM3_CH1 · PWM 20kHz → Cytron MD20A |
+| **PA0** | MOTOR_DIR | HIGH=Forward, LOW=Reverse |
+| **PA8** | ENCODER_B | TIM1_CH1 · Encoder TI12 |
+| **PA9** | ENCODER_A | TIM1_CH2 · Encoder TI12 |
+| **PC4** | CURRENT_SENSOR | ADC2_IN5 · WCS1800 (VCC=5V) |
+| **PB13** | ESTOP | EXTI Falling → STATE_EMER ทันที |
+| **PB5** | MODE | EXTI · Auto/Manual selector |
+| **PA1/PA4/PB0** | REED_UP/DOWN/GRIP | Digital Input Pull-up |
+| **PC1/PB11** | PNEUMATIC/GRIPPER | Digital Output |
+| **PC7/PC8/PB7** | TOWER G/R/Y | Tower Light |
+| **PB6** | EMER_OUTPUT | HIGH เมื่อ E-Stop active |
+| **PB14** | POWER_LATCH | ล็อคไฟ (SET=ON ตอน startup) |
+| **PA2/PA3** | LPUART1 TX/RX | Modbus RTU 19200 8E1 |
+| **PC10/PC11** | USART3 TX/RX | Joystick 460800 8N1 |
+
+> Pin mapping ครบถ้วน → [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md)
+
+---
+
+## Modbus Register Map (สรุป)
+
+**Slave ID: 21 · 19200 8E1 · LPUART1**
+
+### WRITE (PC → STM32)
+| Register | ความหมาย | ค่า |
+|---------|---------|-----|
+| `0x00` | Heartbeat | ส่ง `18537` เมื่อเห็น `22881` |
+| `0x01` | Mode Command | `1`=Home · `2`=Manual · `4`=Auto · `0xFF`=Reset alarm |
+| `0x03` | Output Control | bit0=Pneumatic · bit1=Gripper · bit2=TowerG · bit3=TowerY |
+| `0x05` | Jog | (int16) ความเร็ว jog |
+| `0x24` | P2P Target | (int16) ตำแหน่งเป้าหมาย (encoder counts) |
+| `0x25` | Soft Stop | `1` = หยุด |
+
+### READ (STM32 → PC)
+| Register | ความหมาย | ค่า |
+|---------|---------|-----|
+| `0x00` | Heartbeat | STM32 ส่ง `22881` |
+| `0x04` | Current | กระแส (mA, uint16) |
+| `0x26` | Reed Sensors | bit0=Up · bit1=Down · bit2=Grip |
+| `0x27` | Current Task | `0`=Idle · `1`=Homing · `8`=P2P |
+| `0x28` | Encoder Position | (int16) encoder counts |
+| `0x31` | Emergency | `1`=Active |
+
+> Modbus ละเอียดครบ → [docs/SOFTWARE_LOGIC.md](docs/SOFTWARE_LOGIC.md)
+
+---
+
+## สิ่งที่ต้องทำต่อ
+
+| งาน | ใคร | ไฟล์ |
+|-----|-----|------|
+| กำหนดขา HOME sensor ใน .ioc | Hardware | HARDWARE_SETUP.md |
+| Implement Homing logic | Control | DEVELOPER_GUIDE.md |
+| Implement PID (STATE_AUTO) | Control | DEVELOPER_GUIDE.md |
+| ใส่ Capacitor 4700µF×3 บน MD20A VIN | Hardware | — |
+| ตั้ง ADC Sampling 47.5 cycles ใน .ioc | Firmware | ทุกครั้งที่ Generate Code |
+| แก้ TIM3 เป็น "PWM Generation CH1" ใน .ioc | Firmware | HARDWARE_SETUP.md |
+
+---
+
+## Base System — วิธีเปิด UI
+
 ```bash
 docker load -i frontend-image.tar
-```
-
-### 3. Start the System
-
-1. Launch the entire stack using Docker Compose:
-```bash
 docker-compose up -d
+# เปิด http://localhost:3000
 ```
-<!-- Status: Once the terminal shows Started, the dashboard will be live at: http://localhost:3000 -->
 
-2. Start the python server
 ```bash
+# รัน Python bridge
 main.exe
+# ควรเห็น: WebSocket Server is running on ws://localhost:8765...
 ```
 
-Once `server.py` is running, your terminal should display:
-`WebSocket Server is running on ws://localhost:8765...`
-
-1.  Open your web browser.
-2.  Navigate to: **[http://localhost:3000](http://localhost:3000)** (Reload once if it shown disconnect from python, If not work check if main is running)
-
----
-
-### How to Stop and Remove the Container
-If you need to stop the system or clean up the container, use these commands:
-
-* Stops and removes all containers and networks.
-    ```bash
-    docker-compose down
-    ```
-* Verifies if both Frontend and Backend are currently running.
-    ```bash
-    docker-compose ps
-    ```
-* View error messages or activity from the Python Backend.
-    ```bash
-    docker-compose logs backend
-    ```
-* Restarts all containers without deleting them.
-    ```bash
-    docker-compose restart
-    ```
----
-## How to use 
-
-- **[How to use Basesystem 101](https://canva.link/9pr3jhzbh18pxbn)**
-
-
----
-
-<!-- > [!TIP]
-> Use `docker ps -a` to check the status of all your containers.
- -->
-
-> [!IMPORTANT]
-> Ensure that port **3000** (Web UI) and port **8765** (WebSocket) are not being used by other applications.
-
----
-
-
-
-
-## 1. What the Base System does (big picture)
-
-1. You use the **web user interface (UI)** in the browser.
-2. The UI talks to the Base System over a **local WebSocket** (JSON messages on your PC).
-3. The Base System talks to the **robot controller (STM32)** over **USB serial** using **Modbus RTU**.
-4. Each side only sees its own link: the UI never speaks Modbus directly; the robot never sees the WebSocket.
-
-
-**Serial link (Modbus RTU)** — must match the robot firmware:
-
-| Setting   | Value   |
-|----------|---------|
-| Baud     | 19200   |
-| Data bits| 8       |
-| Parity   | Even    |
-| Stop bits| 1       |
-
-**Modbus slave address:** default **21** 
-
----
-
-## 2. How data is **sent** and **received**
-
-### 2.1 From PC to robot (**WRITE**)
-
-The Base System sends **Write Single Register** commands. Each write targets **one 16-bit holding register** at a time, identified by its **address** (hex below).
-
-- Some registers carry **bit patterns** (mode flags, gripper command codes).
-- Others carry **signed numbers** (−32768 … +32767). On the wire, negative values are sent as **16-bit two’s complement** (the same integer range, encoded as 0…65535).
-
-### 2.1.1 Registers that are mainly “one bit active”
-
-Every holding register is still **16 bits** on the wire. For many **control** and **status** addresses, the firmware only defines **low bits** (often **bit 0** only, or bits **0–4**). The tables below add **decimal**, **hex**, and **binary (low bits)**.
-
-<!-- - **WRITE:** e.g. **0x01** (mode) uses **one** power-of-two at a time -> exactly **one** bit set among bits 0–4. **0x04, 0x06, 0x23, 0x25** use **bit 0** as on/off or choice.
-- **READ:** e.g. **0x26–0x27, 0x31** — each listed bit is **1 = active**, **0 = inactive** (unless the lab states otherwise). -->
-
-Full **int16** magnitudes (jog, P2P value, test speeds, **0x28–0x30**) are **not** “one-hot bits”; use decimal / two’s complement for those.
-
-### 2.2 From robot to PC (**READ**)
-
-The Base System periodically **reads a block** of holding registers starting at address **0x00**, through **0x31** (50 registers in one read). That gives:
-
-- **Heartbeat** value on **0x00**
-- **Status** on **0x26 … 0x31** (sensors, task, motion, emergency)
-
-The UI is updated from these read values (position, speed, gripper state, etc.).
-
-### 2.3 Heartbeat (special case on **0x00**)
-
-| Who   | Action |
-|-------|--------|
-| Robot | Writes **22881** (“YA”) into register **0x00** when it expects a reply. |
-| Base System | Writes **18537** (“HI”) back into **0x00**. |
-
-If the Base System does not see the expected heartbeat pattern in time, the UI can show the link as **not alive**, even if the cable is plugged in.
-
-### 2.4 Numbers with a decimal place (position, speed, acceleration)
-
-For **READ** addresses **0x28, 0x29, 0x30**, the register holds a **signed integer** that is **10×** the real value:
-
-| Meaning        | Register | Decode |
-|----------------|----------|--------|
-| Real position  | 0x28     | `real = (signed raw) / 10` |
-| Real velocity  | 0x29     | same |
-| Real acceleration | 0x30  | same |
-
-**Example:** if the read raw value is **1234**, the Base System shows **123.4** for that quantity.
-
----
-
-## 3. WRITE register map — commands the PC sends to the robot
-
-Every row is something the Base System can **write** when you use the UI. Addresses are **hexadecimal**.
-
-### 3.1 Summary table (all write addresses)
-
-| Addr | Topic | Short description |
-|-----:|--------|-------------------|
-| **0x00** | Heartbeat | Reply **HI (18537)** when robot sends **YA (22881)** on read. |
-| **0x01** | Operating mode | Select Home / Jog / Auto / Set home / Test (one flag value at a time). |
-| **0x02** | Manual gripper motion | Up, Down, Open, Close (encoded values below). |
-| **0x03** | Gripper sequence | Pick or Place. |
-| **0x04** | Gripper in AUTO | Enable or disable gripper actions during automatic motion. |
-| **0x05** | Jog | Signed step size in **degrees** (+ = CCW, − = CW). |
-| **0x06** | Test type | Performance vs Precision test. |
-| **0x07** | Performance test | Desired velocity. |
-| **0x08** | Performance test | Desired acceleration. |
-| **0x09** | Precision test | Initial position. |
-| **0x10** | Precision test | Final (target) position. |
-| **0x11** | Precision test | Repeat count; **sign** selects **unit** (degree vs index — see 3.6). |
-| **0x12 – 0x21** | Pick & place | Sequence slots: hole index and direction per slot (signed int16). |
-| **0x22** | Pick & place | Number of **pairs** (pick+place) in the sequence. |
-| **0x23** | Point-to-point | Unit: **degree** or **saved index**. |
-| **0x24** | Point-to-point | Target value (signed), interpreted using **0x23**. |
-| **0x25** | Safety | Soft stop: run vs stop. |
-
----
-
-### 3.2 **0x01** — Operating mode (single bit “on” among bits 0–4)
-
-The UI sends **one** value to **0x01**. Each value is a **power of two**: in binary, **exactly one** of the low bits is **1** (one-hot style for mode select).
-
-| Bit | Mask (dec) | Mask (hex) | Low 5 bits (binary) | Mode / command |
-|:---:|:----------:|:----------:|:-------------------:|----------------|
-| **0** | **1** | 0x0001 | `0b00001` | Go home |
-| **1** | **2** | 0x0002 | `0b00010` | Manual / Jog |
-| **2** | **4** | 0x0004 | `0b00100` | Auto |
-| **3** | **8** | 0x0008 | `0b01000` | Set home |
-| **4** | **16** | 0x0010 | `0b10000` | Test |
-
-The full register is 16 bits; bits **5–15** are **0** in normal use unless firmware defines more.
-
----
-
-### 3.3 **0x02** — Gripper: Up / Down / Open / Close (manual)
-
-Each command writes a **different code**; values **1, 2, 4** are **single-bit masks** in bits 0–2 (**Up** is all bits clear in that group).
-
-| Command | Dec | Hex | Low 4 bits (binary) | Note |
-|---------|----:|----:|:-------------------:|------|
-| Up      | **0** | 0x0000 | `0b0000` | No command bits set |
-| Down    | **1** | 0x0001 | `0b0001` | **bit 0** |
-| Open    | **2** | 0x0002 | `0b0010` | **bit 1** |
-| Close   | **4** | 0x0004 | `0b0100` | **bit 2** |
-
----
-
-### 3.4 **0x03** — Gripper: Pick / Place
-
-| Command | Dec | Hex | Low 2 bits (binary) | Active bit |
-|---------|----:|----:|:-------------------:|:----------:|
-| Pick    | **1** | 0x0001 | `0b01` | **bit 0** |
-| Place   | **2** | 0x0002 | `0b10` | **bit 1** |
-
----
-
-### 3.5 **0x04** — Gripper enable (used with AUTO)
-
-Only **bit 0** is used as enable; rest of the register is **0** in normal use.
-
-| Dec | Hex | Binary (low 4) | **bit 0** | Meaning |
-|----:|----:|:--------------:|:---------:|---------|
-| **0** | 0x0000 | `0b0000` | **0** | Gripper **disabled** during auto |
-| **1** | 0x0001 | `0b0001` | **1** | Gripper **enabled** during auto |
-
----
-
-### 3.6 **0x05** — Jog (degrees)
-
-| Content | Type | Meaning |
-|---------|------|---------|
-| Signed int16 | degrees step | **Positive** -> counter-clockwise (CCW). **Negative** -> clockwise (CW). |
-
----
-
-### 3.7 **0x06 – 0x11** — Test modes
-
-| Addr | Name | Value / type | Meaning |
-|-----:|------|----------------|----------|
-| **0x06** | Test mode | **0** / **1** (see bit table below) | Precision vs Performance |
-| **0x07** | Performance | Signed int16 | Desired **velocity** |
-| **0x08** | Performance | Signed int16 | Desired **acceleration** |
-| **0x09** | Precision | Signed int16 | **Initial** position |
-| **0x10** | Precision | Signed int16 | **Final** position |
-| **0x11** | Precision | Signed int16 | **Repetition count**; **sign** encodes **unit** for repeats (positive -> degree vs negative -> index)  |
-
-**0x06 — binary (test type, bit 0 only):**
-
-| Dec | Hex | Low 2 bits | **bit 0** | Meaning |
-|----:|----:|:----------:|:---------:|---------|
-| **0** | 0x0000 | `0b0` | **0** | Precision test |
-| **1** | 0x0001 | `0b1` | **1** | Performance test |
-
----
-
-### 3.8 **0x12 – 0x21** — Pick and place sequence
-
-There are **10 consecutive addresses** (**0x12** through **0x21**). Each holds **one signed 16-bit value** for one step of the programmed sequence.
-
-| Concept | Rule |
-|---------|------|
-| **Magnitude** | Hole **index** (e.g. 1…5). |
-| **Sign** | **+** -> counter-clockwise, **−** -> clockwise.|
-
-The Base System fills these from your pick/place plan in the UI, then writes **0x22**.
-
----
-
-### 3.9 **0x22** — Number of pick–place pairs
-
-| Content | Meaning |
-|---------|---------|
-| Unsigned count | How many **pairs** (pick + place) the sequence contains. |
-
----
-
-### 3.10 **0x23** — Point-to-point: unit
-
-Only **bit 0** selects the unit; **0** = degree, **1** = index.
-
-| Dec | Hex | Low 2 bits | **bit 0** | Unit for **0x24** |
-|----:|----:|:----------:|:---------:|-------------------|
-| **0** | 0x0000 | `0b0` | **0** | **Degree** |
-| **1** | 0x0001 | `0b1` | **1** | **Index**  |
-
----
-
-### 3.11 **0x24** — Point-to-point: target
-
-| Content | Meaning |
-|---------|---------|
-| Signed int16 | Target **degrees** or **index**, depending on **0x23**. Sign indicates direction where the motion planner uses it. |
-
----
-
-### 3.12 **0x25** — Soft stop
-
-| Dec | Hex | Low 2 bits | **bit 0** | Meaning |
-|----:|----:|:----------:|:---------:|---------|
-| **0** | 0x0000 | `0b0` | **0** | Normal running |
-| **1** | 0x0001 | `0b1` | **1** | Request **soft stop** |
-
----
-
-## 4. READ register map — status the robot sends to the PC
-
-The Base System **reads** these to refresh the UI. Block read covers **0x00** and **0x26 … 0x31**.
-
-### 4.1 Summary table
-
-| Addr | Name | What you use it for |
-|-----:|------|---------------------|
-| **0x00** | Heartbeat | Link life; robot sends **YA (22881)**; PC answers **HI** on write. |
-| **0x26** | Lead / reed sensors | Physical gripper limits and jaw state (bits). |
-| **0x27** | Current task | What the motion sequencer is doing (Homing, Pick, Place, etc.). |
-| **0x28** | Position | θ position vs current home (**÷ 10** for display). |
-| **0x29** | Velocity | **÷ 10** for display. |
-| **0x30** | Acceleration | **÷ 10** for display. |
-| **0x31** | Emergency | Emergency input / safety state (bit). |
-
----
-
-### 4.2 **0x26** — Lead / reed sensors (typical bit meaning)
-
-Low bits of the register describe **three reed switches** (on/off). The Base System derives gripper **height** and **jaw** labels for the UI.
-
-| Bit | Mask (hex) | Weight | Binary place | **1 =** | Meaning (hardware) |
-|:---:|:----------:|:------:|:------------:|---------|---------------------|
-| **0** | 0x0001 | 1 | `...0001` | Reed 1 **ON** | Often paired with bit 1 for **up/down** |
-| **1** | 0x0002 | 2 | `...0010` | Reed 2 **ON** | |
-| **2** | 0x0004 | 4 | `...0100` | Reed 3 **ON** | Often **jaw closed** when active |
-
-**Example raw value:** if **only** bits 0 and 2 are high -> `0b0101` -> dec **5** (0x0005). Compare to what you read on the bus after masking the low 4 bits.
-
-**Typical interpretation (when bits are wired as in the lab):**
-
-| Reed 1 | Reed 2 | UI show |
-|:------:|:------:|-------------|
-| ON | OFF | Up |
-| OFF | ON | Down |
-| other | other | Idle / between |
-
-| Reed 3 | UI show |
-|:------:|----------------|
-| ON | Closed |
-| OFF | Open |
-
-<!-- Exact wiring is defined on the robot; the **register** is always **0x26**. -->
-
----
-
-### 4.3 **0x27** — Current robot task 
-
-The Base System reads low bits and picks **one** task name (first match in this order). Each row is **“this bit = 1”** (other bits may be 0 or 1 depending on firmware; priority order is as implemented in the Base System).
-
-| Bit | Mask (hex) | Mask (dec) | Low 4 bits (example **only** this bit) | Shown task |
-|:---:|:----------:|:----------:|:---------------------------------------:|------------|
-| **0** | 0x0001 | 1 | `0b0001` | Homing |
-| **1** | 0x0002 | 2 | `0b0010` | Go Pick |
-| **2** | 0x0004 | 4 | `0b0100` | Go Place |
-| **3** | 0x0008 | 8 | `0b1000` | Go Point |
-| — | — | **0** | `0b0000` | Idle (if none of the above match) |
-
----
-
-### 4.4 **0x28, 0x29, 0x30** — Motion feedback (scaled ×10)
-
-| Addr   | Quantity | Decode |
-|--------|----------|--------|
-| **0x28** | Position | signed raw **÷ 10** = user units |
-| **0x29** | Velocity | signed raw **÷ 10** |
-| **0x30** | Acceleration | signed raw **÷ 10** |
-
----
-
-### 4.5 **0x31** — Emergency / safety state
-
-Typically only **bit 0** is defined; treat **1** as “active / latched” per lab.
-
-| Dec (if only bit0 matters) | Hex | Low 2 bits | **bit 0** | Meaning |
-|---------------------------:|----:|:----------:|:---------:|---------|
-| **0** | 0x0000 | `0b0` | **0** | Not in emergency (normal) |
-| **1** | 0x0001 | `0b1` | **1** | Emergency active (e.g. E-stop / interlock — per firmware) |
-
----
-
-## 5. Two’s complement (for signed registers)
-
-If you read or write a **signed** value as a raw 16-bit number:
-
-| If raw ≥ 32768 | Signed value = raw − 65536 |
-|----------------|----------------------------|
-| Else           | Signed value = raw |
-
-**Example:** raw **65413** -> signed **−123**. After **÷ 10** on 0x28–0x30, that is **−12.3** in display units.
-
----
-
-## 6. Windows: which COM port to choose
-
-1. Open **Device Manager** -> **Ports (COM & LPT)**.
-2. Find **STMicroelectronics STLink Virtual COM Port (COMx)**.
-3. In the Base System connect dialog, enter that **COM** number (**x**).
-
----
-  
+**COM Port (Windows):** Device Manager → Ports → *STMicroelectronics STLink Virtual COM Port (COMx)*

@@ -1,5 +1,5 @@
 #MicroXplorer Configuration settings - do not modify
-ADC2.Channel-4\#ChannelRegularConversion=ADC_CHANNEL_11
+ADC2.Channel-4\#ChannelRegularConversion=ADC_CHANNEL_5
 ADC2.CommonPathInternal=null|null|null|null
 ADC2.IPParameters=Rank-4\#ChannelRegularConversion,Channel-4\#ChannelRegularConversion,SamplingTime-4\#ChannelRegularConversion,OffsetNumber-4\#ChannelRegularConversion,NbrOfConversionFlag,CommonPathInternal
 ADC2.NbrOfConversionFlag=1
@@ -93,7 +93,7 @@ Mcu.Package=LQFP64
 Mcu.Pin0=PC14-OSC32_IN
 Mcu.Pin1=PC15-OSC32_OUT
 Mcu.Pin10=PA6
-Mcu.Pin11=PC5
+Mcu.Pin11=PC4
 Mcu.Pin12=PB0
 Mcu.Pin13=PB1
 Mcu.Pin14=PB10
@@ -260,9 +260,8 @@ PC15-OSC32_OUT.GPIOParameters=GPIO_Label
 PC15-OSC32_OUT.GPIO_Label=RCC_OSC32_OUT
 PC15-OSC32_OUT.Locked=true
 PC15-OSC32_OUT.Signal=RCC_OSC32_OUT
-PC5.Locked=true
-PC5.Mode=IN11-Single-Ended
-PC5.Signal=ADC2_IN11
+PC4.Mode=IN5-Single-Ended
+PC4.Signal=ADC2_IN5
 PC6.GPIOParameters=GPIO_PuPd,GPIO_Label
 PC6.GPIO_Label=PNEUMATIC
 PC6.GPIO_PuPd=GPIO_PULLDOWN

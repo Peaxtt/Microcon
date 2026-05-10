@@ -74,7 +74,7 @@ RobotState_t current_state = STATE_INIT;
 // Motor & PID Globals (For Control Team)
 float motor_speed_cmd = 0.0f; // -1.0 to 1.0
 int32_t current_position = 0;
-uint16_t current_sensor_val = 0;
+float current_sensor_A = 0.0f;
 
 // Power Latch Timer
 uint32_t power_btn_hold_ms = 0;
@@ -104,8 +104,9 @@ typedef struct {
   float    ramp_rate;      // slew rate /10ms: 0.01=slow 0.1=fast
   float    max_speed;      // hard cap 0.0-1.0
   // Mode 3: Auto Motor Test
-  float    auto_speed;     // speed 0.0-1.0
-  uint16_t auto_period_ms; // ms ต่อทิศ
+  float    auto_speed;         // speed 0.0-1.0
+  uint16_t auto_period_fwd_ms; // ms ทิศ Forward (DIR=SET)
+  uint16_t auto_period_rev_ms; // ms ทิศ Reverse (DIR=RESET)
   // Current sensor calibration (WCS1800)
   float    cur_zero_v;     // voltage ที่ 0A (วัดจาก multimeter ตอนไม่มีกระแส)
   float    cur_sens;       // sensitivity V/A (0.066 = 66mV/A)
@@ -123,7 +124,7 @@ typedef struct {
   RobotState_t state;
   float    motor_cmd;
   int32_t  encoder;
-  uint16_t current_mA;
+  float    current_A; // Amperes, 4 decimal places
 } DashStatus_t;
 
 typedef struct {
@@ -157,9 +158,10 @@ DevDashboard_t dev_dash = {
   .Ctrl.mode          = SYS_MODE_PRODUCTION,
   .Ctrl.ramp_rate     = 0.03f,
   .Ctrl.max_speed     = 0.40f,
-  .Ctrl.auto_speed    = 0.30f,
-  .Ctrl.auto_period_ms= 1000,
-  .Ctrl.cur_zero_v    = 1.65f,  // ← วัด multimeter ที่ PC5 ตอน 0A แล้วใส่ค่าจริง
+  .Ctrl.auto_speed         = 0.30f,
+  .Ctrl.auto_period_fwd_ms = 1000,
+  .Ctrl.auto_period_rev_ms = 1000,
+  .Ctrl.cur_zero_v    = 2.5f,  // ← วัด multimeter ที่ PC5 ตอน 0A แล้วใส่ค่าจริง
   .Ctrl.cur_sens      = 0.066f, // 66mV/A สำหรับ WCS1800
 };
 /* USER CODE END PV */
@@ -299,7 +301,7 @@ int main(void)
           float v = (filtered_adc / 4095.0f) * 3.3f;
           float i_a = (v - dev_dash.Ctrl.cur_zero_v) / dev_dash.Ctrl.cur_sens;
           if (i_a < 0.0f) i_a = -i_a;
-          current_sensor_val = (uint16_t)(i_a * 1000.0f); // mA
+          current_sensor_A = i_a; // Amperes (float, 4 decimal places)
         }
       }
 
@@ -313,7 +315,7 @@ int main(void)
       
       mb_slave.registers[0x28] = (uint16_t)current_position; 
       mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) ? 1 : 0;
-      mb_slave.registers[0x04] = current_sensor_val; // Save filtered ADC to Modbus
+      mb_slave.registers[0x04] = (uint16_t)(current_sensor_A * 1000.0f); // Modbus เก็บเป็น mA (int)
       
       // Heartbeat Logic
       static uint32_t hb_timer = 0;
@@ -386,8 +388,15 @@ int main(void)
           float joy_target = (joy_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
                              (joy_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : joy_raw;
           static float joy_ramp = 0.0f;
+          static uint8_t joy_dead_cnt = 0;
           float ramp_rate_local = dev_dash.Ctrl.ramp_rate;
-          if      (joy_target > joy_ramp + ramp_rate_local) joy_ramp += ramp_rate_local;
+          // Direction change dead-time: hold at 0 for 5 cycles (50ms) ก่อนสลับทิศ
+          if ((joy_target > 0.0f && joy_ramp < 0.0f) ||
+              (joy_target < 0.0f && joy_ramp > 0.0f)) {
+            joy_dead_cnt = 5;
+          }
+          if (joy_dead_cnt > 0) { joy_ramp = 0.0f; joy_dead_cnt--; }
+          else if (joy_target > joy_ramp + ramp_rate_local) joy_ramp += ramp_rate_local;
           else if (joy_target < joy_ramp - ramp_rate_local) joy_ramp -= ramp_rate_local;
           else                                               joy_ramp  = joy_target;
           safe_speed = joy_ramp;
@@ -412,16 +421,29 @@ int main(void)
         // --- AUTO MOTOR TEST MODE ---
         static uint16_t auto_test_timer = 0;
         static uint8_t  auto_test_dir   = 0;
-        uint16_t half_period = (dev_dash.Ctrl.auto_period_ms / 10);
+        static float    auto_ramp       = 0.0f;
+        static uint8_t  auto_dead_cnt   = 0;
+
+        uint16_t cur_period_ms = auto_test_dir ? dev_dash.Ctrl.auto_period_fwd_ms
+                                                : dev_dash.Ctrl.auto_period_rev_ms;
+        uint16_t half_period = (cur_period_ms / 10);
         if (half_period < 1) half_period = 1;
         auto_test_timer++;
         if (auto_test_timer >= half_period) {
           auto_test_timer = 0;
           auto_test_dir = !auto_test_dir;
+          auto_dead_cnt = 5; // dead-time 50ms ก่อนสลับทิศ
         }
-        safe_speed = dev_dash.Ctrl.auto_speed;
-        if (safe_speed > dev_dash.Ctrl.max_speed) safe_speed = dev_dash.Ctrl.max_speed;
-        if (safe_speed < 0.0f) safe_speed = 0.0f;
+        float auto_target = dev_dash.Ctrl.auto_speed;
+        if (auto_target > dev_dash.Ctrl.max_speed) auto_target = dev_dash.Ctrl.max_speed;
+        if (auto_target < 0.0f) auto_target = 0.0f;
+
+        if (auto_dead_cnt > 0) { auto_ramp = 0.0f; auto_dead_cnt--; }
+        else if (auto_target > auto_ramp + dev_dash.Ctrl.ramp_rate) auto_ramp += dev_dash.Ctrl.ramp_rate;
+        else if (auto_target < auto_ramp - dev_dash.Ctrl.ramp_rate) auto_ramp -= dev_dash.Ctrl.ramp_rate;
+        else                                                          auto_ramp  = auto_target;
+
+        safe_speed = auto_ramp;
         HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin,
                           auto_test_dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
         __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
@@ -530,8 +552,15 @@ int main(void)
         float prod_target = (prod_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
                             (prod_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : prod_raw;
         static float prod_ramp = 0.0f;
+        static uint8_t prod_dead_cnt = 0;
         float prod_ramp_rate_local = dev_dash.Ctrl.ramp_rate;
-        if      (prod_target > prod_ramp + prod_ramp_rate_local) prod_ramp += prod_ramp_rate_local;
+        // Direction change dead-time: hold at 0 for 5 cycles (50ms) ก่อนสลับทิศ
+        if ((prod_target > 0.0f && prod_ramp < 0.0f) ||
+            (prod_target < 0.0f && prod_ramp > 0.0f)) {
+          prod_dead_cnt = 5;
+        }
+        if (prod_dead_cnt > 0) { prod_ramp = 0.0f; prod_dead_cnt--; }
+        else if (prod_target > prod_ramp + prod_ramp_rate_local) prod_ramp += prod_ramp_rate_local;
         else if (prod_target < prod_ramp - prod_ramp_rate_local) prod_ramp -= prod_ramp_rate_local;
         else                                                      prod_ramp  = prod_target;
         safe_speed = prod_ramp;
@@ -558,7 +587,7 @@ int main(void)
             // Reconstruct actual signed motor command for dashboard
             dev_dash.Status.motor_cmd     = (HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin) == GPIO_PIN_SET) ? safe_speed : -safe_speed;
             dev_dash.Status.encoder       = current_position;
-            dev_dash.Status.current_mA    = current_sensor_val;
+            dev_dash.Status.current_A     = current_sensor_A;
 
             dev_dash.In.estop      = HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin);
             dev_dash.In.mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
@@ -679,9 +708,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_11;
+  sConfig.Channel = ADC_CHANNEL_5;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5; // longer for noisy current sensor
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
