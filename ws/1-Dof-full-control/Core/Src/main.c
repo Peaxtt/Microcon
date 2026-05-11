@@ -396,6 +396,20 @@ int main(void)
     if (flag_10ms) {
       flag_10ms = 0;
       
+      // 0. Robust ESTOP Polling (Anti-EMI Noise)
+      static uint8_t estop_debounce = 0;
+      if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) {
+        if (estop_debounce < 5) estop_debounce++;
+        if (estop_debounce >= 3) { // Requires 30ms of solid HIGH signal to trigger
+          current_state = STATE_EMER;
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
+          HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, GPIO_PIN_SET);
+        }
+      } else {
+        estop_debounce = 0;
+      }
+      
       // 1. Read ADC Current Sensor (with Moving Average Filter)
       if (HAL_ADC_Start(&hadc2) == HAL_OK) {
         if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
@@ -841,7 +855,8 @@ int main(void)
             // Dashboard status (pos_rad, vel_rad_s, pos_err, etc.) updated there too
 
             // -- Abort --
-            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+
+            // Disabled Joystick LB Abort in AUTO to prevent floating USART3 EMI noise from triggering random EMER.
             if (mb_slave.registers[0x25] & 0x01) {
               current_state = STATE_IDLE;
               mb_slave.registers[0x25] = 0;
@@ -1514,15 +1529,7 @@ static void Send_Telemetry(void)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == ESTOP_Pin) {
-    // EMER กด (Rising Edge, active HIGH)
-    if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) {
-      current_state = STATE_EMER;
-      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
-      HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, GPIO_PIN_SET); // RESET_LED ON
-    }
-  }
+  // ESTOP is now safely polled in the 100Hz loop to prevent EMI phantom triggers and ISR hangs.
 }
 /* USER CODE END 4 */
 

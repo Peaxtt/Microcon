@@ -103,13 +103,13 @@ SECTIONS
     __exidx_end = .;
     . = ALIGN(4);
   } >RAM
-
+iu
   .preinit_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
   {
     . = ALIGN(4);
     PROVIDE_HIDDEN (__preinit_array_start = .);
     KEEP (*(.preinit_array*))
-    PROVIDE_HIDDEN (__preinit_array_end = .);
+    PROVIDE_HIDDEN (__preinit_array_end = .); 
     . = ALIGN(4);
   } >RAM
 
