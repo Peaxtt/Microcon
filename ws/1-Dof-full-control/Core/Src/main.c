@@ -37,7 +37,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define VEL_WIN      10                     // velocity window size (ticks)
-#define RAD_PER_CNT  (6.28318f / 8192.0f)  // counts → radians (2048PPR × 4x)
+#define RAD_PER_CNT  (6.28318530718f / 8192.0f)  // counts → radians (2048PPR × 4x)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -411,8 +411,55 @@ int main(void)
         }
       }
 
-      // 2. Process incoming Modbus frames (ปิดเมื่อ telemetry_mode=1)
-      if (dev_dash.Ctrl.telemetry_mode == 0) modbus_process(&mb_slave);
+      // 2. Process incoming Modbus frames (Always ON in Multiplexed mode)
+      modbus_process(&mb_slave);
+
+      // --- AI Auto-Tuner & Python UI Integration ---
+      // แยก Register สำหรับ Python UI ออกมาเพื่อไม่ให้ชนกับระบบเดิม
+      // Reg 10: Step CMD, Reg 11: Target Pos, Reg 12: Kp, Reg 13: Ki, Reg 14: Kd, Reg 15: Apply
+      static uint8_t python_step_active = 0;
+      int16_t step_cmd = (int16_t)mb_slave.registers[10];
+      if (step_cmd != 0) {
+        dev_dash.Ctrl.mode = SYS_MODE_HARDWARE_TEST;
+        dev_dash.Ctrl.force_motor_speed = (float)step_cmd / 10000.0f; 
+        python_step_active = 1;
+      } else if (python_step_active) {
+        dev_dash.Ctrl.mode = SYS_MODE_PRODUCTION;
+        dev_dash.Ctrl.force_motor_speed = 0.0f;
+        python_step_active = 0;
+      }
+
+      if (mb_slave.registers[15] == 1) {
+        dev_dash.Auto.kp_vel = (float)mb_slave.registers[12] / 100.0f;
+        dev_dash.Auto.ki_vel = (float)mb_slave.registers[13] / 100.0f;
+        dev_dash.Auto.kd_vel = (float)mb_slave.registers[14] / 100.0f;
+        
+        float target_rad = (float)((int16_t)mb_slave.registers[11]) / 1000.0f;
+        dev_dash.Auto.target_deg = target_rad * (180.0f / 3.14159265f);
+        
+        // Trajectory overrides (Registers 16-19)
+        if (mb_slave.registers[16] <= 2) {
+             dev_dash.Auto.traj_type = (uint8_t)mb_slave.registers[16];
+        }
+        if (mb_slave.registers[17] > 0) {
+             dev_dash.Auto.v_max = (float)mb_slave.registers[17] / 100.0f;
+        }
+        if (mb_slave.registers[18] > 0) {
+             dev_dash.Auto.a_max = (float)mb_slave.registers[18] / 100.0f;
+        }
+        if (mb_slave.registers[19] > 0) {
+             dev_dash.Auto.j_max = (float)mb_slave.registers[19] / 100.0f;
+        }
+
+        dev_dash.Auto.start_move = 1;
+        
+        // Force the State Machine to AUTO so it actually executes the move!
+        if (current_state != STATE_EMER) {
+            current_state = STATE_AUTO;
+        }
+        
+        mb_slave.registers[15] = 0; // Clear apply flag
+      }
 
       // 3. Update Status Registers (0x26 - 0x31)
       mb_slave.registers[0x26] = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port, REED_UP_Pin) == GPIO_PIN_RESET ? 1 : 0) |
@@ -1072,10 +1119,10 @@ static void MX_LPUART1_UART_Init(void)
 
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 19200;
+  hlpuart1.Init.BaudRate = 115200;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_EVEN;
+  hlpuart1.Init.Parity = UART_PARITY_NONE;
   hlpuart1.Init.Mode = UART_MODE_TX_RX;
   hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -1180,11 +1227,11 @@ static void MX_TIM1_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 15;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 15;
   if (HAL_TIM_Encoder_Init(&htim1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1460,13 +1507,9 @@ static void Send_Telemetry(void)
   buf[14] = 0x03;
   buf[15] = 0x03;
 
-  if (dev_dash.Ctrl.telemetry_mode == 1) {
-    // LPUART1 (USB ST-Link VCP) 19200 baud — 16 bytes = ~9ms, timeout 15ms
-    HAL_UART_Transmit(&hlpuart1, buf, sizeof(buf), 15);
-  } else {
-    // UART4 (external adapter) 115200 baud — 16 bytes = ~1.4ms, timeout 10ms
-    HAL_UART_Transmit(&huart4, buf, sizeof(buf), 10);
-  }
+  // Single-Cable Multiplexed Mode: Always send via ST-Link (LPUART1)
+  // Use a very short timeout (2ms) so it doesn't block the loop if Modbus is busy
+  HAL_UART_Transmit(&hlpuart1, buf, sizeof(buf), 2);
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -1537,7 +1580,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     ctrl_acc_rad_s2 = ctrl_acc_rad_s2 * (1.0f - alpha) + raw_acc * alpha;
 
     // ── AUTO CONTROL @ 1kHz ──────────────────────────────────────────────────
-    if (current_state == STATE_AUTO) {
+    if (current_state == STATE_AUTO && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
       // Trajectory reference
       float ideal_pos, ideal_vel;
       if (dev_dash.Auto.traj_type == 2) {

@@ -1,0 +1,44 @@
+
+========================================
+🚀 INITIATING COMPREHENSIVE AI TUNER
+Time: 00:55:11
+========================================
+
+🤖 [1/4] Securing robot to Home (0 rad)...
+🤖 [2/4] Physics Modeling (Open-Loop Step)...
+   ↳ K (Gain) = 0.00059
+   ↳ Tau (TC) = 0.0823 s
+
+🤖 [3/4] Sweeping Controller Matrix...
+
+--- Testing 'Soft' Profile ---
+   ↳ Kp: 1124.22, Ki: 13652.93
+   ↳ Action: Move to +1.57 rad
+     • SS Error : 0.1841 rad
+     • Overshoot: 11.7 %
+     • Stability: 0.000 (Lower=Better)
+   ↳ Action: Return to 0.0 rad
+   ★ Combined Score: 108.64
+
+--- Testing 'Nominal' Profile ---
+   ↳ Kp: 1686.34, Ki: 20479.40
+   ↳ Action: Move to +1.57 rad
+     • SS Error : 0.1841 rad
+     • Overshoot: 11.7 %
+     • Stability: 0.000 (Lower=Better)
+   ↳ Action: Return to 0.0 rad
+   ★ Combined Score: 108.64
+
+--- Testing 'Aggressive' Profile ---
+   ↳ Kp: 2810.56, Ki: 34132.34
+   ↳ Action: Move to +1.57 rad
+     • SS Error : 0.1841 rad
+     • Overshoot: 11.7 %
+     • Stability: 0.000 (Lower=Better)
+   ↳ Action: Return to 0.0 rad
+   ★ Combined Score: 108.64
+
+========================================
+✅ TUNING COMPLETE. WINNER: SOFT
+   Targeting Kp = 1124.224, Ki = 13652.935
+========================================

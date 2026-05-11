@@ -1,0 +1,65 @@
+Starting Expert AI Tuner...
+
+========================================
+🚀 INITIATING ADVANCED ITERATIVE TUNER
+Time: 01:26:56
+========================================
+
+🤖 [1/5] Homing robot safely...
+
+🤖 [2/5] System Identification (Physics Math)...
+   ↳ System DC Gain = 0.0570 (rad/s per %PWM)
+   ↳ Time Constant  = 0.0693 s
+   ↳ SIMC Base Kp = 17.54
+   ↳ SIMC Base Ki = 252.98
+
+🤖 [3/5] Iterative P-Gain Sweep (Finding rigid stability)...
+
+--- Testing Kp = 10.52 (0.6x) ---
+   ↳ Avg SS Error: 0.465 rad
+   ↳ Avg Overshoot: 0.0 %
+   ↳ Avg Stability: 3.98 (Low=Smooth)
+   ★ P-Score: 227.2
+
+--- Testing Kp = 17.54 (1.0x) ---
+   ↳ Avg SS Error: 0.175 rad
+   ↳ Avg Overshoot: 0.0 %
+   ↳ Avg Stability: 6.04 (Low=Smooth)
+   ★ P-Score: 231.1
+
+--- Testing Kp = 24.55 (1.4x) ---
+   ↳ Avg SS Error: 0.115 rad
+   ↳ Avg Overshoot: 0.0 %
+   ↳ Avg Stability: 7.19 (Low=Smooth)
+   ★ P-Score: 253.8
+
+✅ Locked Optimal P-Gain: 10.52
+
+🤖 [4/5] Iterative I-Gain Sweep (Removing error)...
+
+--- Testing Ki = 50.60 (0.2x) ---
+   ↳ Avg SS Error: 0.025 rad
+   ↳ Avg Overshoot: 3.3 %
+   ↳ Avg Stability: 1.65
+   ★ I-Score: 126.6
+
+--- Testing Ki = 126.49 (0.5x) ---
+   ↳ Avg SS Error: 0.533 rad
+   ↳ Avg Overshoot: 0.0 %
+   ↳ Avg Stability: 0.00
+   ★ I-Score: 281.5
+
+--- Testing Ki = 252.98 (1.0x) ---
+   ↳ Avg SS Error: 0.533 rad
+   ↳ Avg Overshoot: 0.0 %
+   ↳ Avg Stability: 0.00
+   ★ I-Score: 281.5
+
+✅ Locked Optimal I-Gain: 50.60
+
+========================================
+🏆 TUNING COMPLETION REPORT
+   Final Kp = 10.522
+   Final Ki = 50.596
+========================================
+
