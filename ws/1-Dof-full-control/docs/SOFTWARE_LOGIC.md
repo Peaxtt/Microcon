@@ -5,15 +5,19 @@
 ## Architecture Overview
 
 ```
-[TIM7 @1kHz ISR]                    [Main Loop while(1)]
-  ├─ อ่าน Encoder (TIM1)              └─ if (flag_10ms) @ 100Hz
-  ├─ Poll Power Button                    ├─ อ่าน ADC Current (PC4)
-  ├─ Modbus timeout tick                  ├─ Modbus process
-  └─ ตั้ง flag_10ms ทุก 10 รอบ           ├─ อัพเดท Modbus registers
-                                          ├─ เช็ค MODE switch
-[EXTI ISR]                               ├─ System Mode → State Machine
-  ├─ PB13 (ESTOP) → STATE_EMER           ├─ Apply Motor (ramp + dead-time)
-  └─ PB5 (MODE) → Auto/Manual           └─ อัพเดท dev_dash
+[TIM7 @1kHz ISR]                         [Main Loop while(1)]
+  ├─ Encoder delta → current_position       └─ if (flag_10ms) @ 100Hz
+  ├─ Windowed velocity → ctrl_vel_rad_s         ├─ ADC Current (PC4)
+  ├─ Acceleration LPF → ctrl_acc_rad_s2         ├─ Modbus process
+  ├─ [STATE_AUTO] Trajectory update             ├─ Modbus registers
+  ├─ [STATE_AUTO] Position PID                  ├─ MODE switch check
+  ├─ [STATE_AUTO] Velocity PID → PWM            ├─ State Machine (triggers)
+  ├─ Poll Power Button                          ├─ [Non-AUTO] Motor Apply
+  └─ Modbus timeout tick                        ├─ Send_Telemetry() → UART4
+                                                ├─ dev_dash update
+[EXTI ISR]                                      └─ IWDG Refresh
+  ├─ PB13 (ESTOP) → STATE_EMER
+  └─ PB5 (MODE) → Auto/Manual
 ```
 
 ---
@@ -87,20 +91,31 @@ Joystick/Modbus/State Machine
 
 ## Joystick Mapping (XInput, USART3 460800 8N1)
 
-| ปุ่ม/แกน | Mode | Action |
-|---------|------|--------|
-| LY + RT (กำค้าง) | Manual/Joystick Test | ควบคุมมอเตอร์ (Deadman switch) |
-| L3 + R3 | Production | Software E-Stop → STATE_EMER |
-| LT + BTN_X | Production | เข้า STATE_CALIBRATE (Homing) |
-| BTN_BACK | Production | Reset alarm จาก STATE_EMER |
-| BTN_Y | Manual | กระบอกลม ON |
-| BTN_X | Manual | กระบอกลม OFF |
-| BTN_A | Manual | Pick sequence (ลม+gripper) |
-| BTN_B | Manual | Place sequence |
-| BTN_LB | Manual/Auto | → STATE_EMER |
-| DPAD_UP/DOWN/LEFT | Joystick Test | Tower G/Y/R |
-| DPAD_RIGHT | Joystick Test | EMER_OUTPUT |
-| BTN_Y/B/X | Joystick Test | Pneumatic/Gripper/Reset LED |
+### Mode 2 — Joystick Test (bypass State Machine, ทดสอบ hardware ตรงๆ)
+| ปุ่ม | Output | Pin |
+|------|--------|-----|
+| BTN_A | EMER_OUTPUT | PB14 |
+| BTN_B | POWER_LATCH | PB6 |
+| BTN_X | PNEUMATIC | PC6 |
+| BTN_Y | GRIPPER | PB11 |
+| DPAD_UP | TOWER_G | PC7 |
+| DPAD_DOWN | TOWER_Y | PB7 |
+| DPAD_LEFT | TOWER_R | PC8 |
+| DPAD_RIGHT | RESET_LED | PB4 |
+| RT (กำค้าง) + LY | Motor speed | PA6 PWM |
+
+### Mode 0 — Production (State Machine)
+| ปุ่ม/แกน | Action |
+|---------|--------|
+| LT + BTN_X | เข้า STATE_CALIBRATE (Homing) |
+| RT + LY | เข้า STATE_MANUAL + ควบคุมมอเตอร์ |
+| L3 + R3 | Software E-Stop → STATE_EMER |
+| BTN_LB | → STATE_EMER (ใน Manual/Auto) |
+| BTN_BACK | Reset alarm จาก STATE_EMER |
+| BTN_X (Manual) | กระบอกลม OFF |
+| BTN_Y (Manual) | กระบอกลม ON |
+| BTN_A (Manual) | Pick sequence |
+| BTN_B (Manual) | Place sequence |
 
 Joystick timeout: ถ้าไม่ได้รับ packet >500ms → `connected=0` → motor=0
 
@@ -124,13 +139,59 @@ float i_a = (v - cur_zero_v) / cur_sens;             // Voltage → Amperes
 ## Encoder Logic
 
 ```c
-// TIM1, Encoder Mode TI12 (4x resolution)
+// TIM1, Encoder Mode TI12 (4x resolution) — 2048 PPR × 4 = 8192 counts/rev
 // ใน TIM7 1kHz ISR:
-static uint16_t last_cnt = 0;
-uint16_t now_cnt = __HAL_TIM_GET_COUNTER(&htim1);
-current_position += (int32_t)(int16_t)(now_cnt - last_cnt);
-last_cnt = now_cnt;
-// current_position เป็น int32_t, รองรับ travel ไม่จำกัด (delta accumulation)
+static uint16_t enc_last = 0;
+uint16_t enc_now = (uint16_t)__HAL_TIM_GET_COUNTER(&htim1);
+int32_t enc_delta = (int32_t)(int16_t)(enc_now - enc_last);
+enc_last = enc_now;
+current_position += enc_delta;  // int32_t, ไม่ overflow
+
+// Windowed velocity (10-sample ring buffer @ 1kHz):
+// ctrl_vel_rad_s = sum(10 deltas) × (2π / 8192 / 10 / 0.001)
+// หน่วย: rad/s, lag ~5ms, noise ≈ 0.077 rad/s
+```
+
+**Unit conversions:**
+- `RAD_PER_CNT = 2π / 8192 ≈ 7.67×10⁻⁴ rad/count`
+- `pos_rad = current_position × RAD_PER_CNT`
+- `vel_rad_s` = windowed velocity จาก ISR (global: `ctrl_vel_rad_s`)
+
+---
+
+## Telemetry — Simulink
+
+ส่งทุก 10ms (100Hz) จาก main loop — **16 bytes** per packet:
+
+```
+Byte  0-1 : 7E 7E              ← header (2 bytes)
+Byte  2-5 : position  float32  ← rad    (4 bytes)
+Byte  6-9 : velocity  float32  ← rad/s  (4 bytes)
+Byte 10-13: acceleration float32 ← rad/s² (4 bytes)
+Byte 14-15: 03 03              ← terminator (2 bytes)
+```
+Total: **16 bytes** per packet (ไม่มี checksum)
+
+**เลือก UART ผ่าน Live Expressions:**
+
+| `telemetry_mode` | UART | Baud | COM Port | Modbus |
+|-----------------|------|------|---------|--------|
+| `0` (default) | UART4 (PB9/PB8) | 115200 | USB-UART adapter | ✅ ใช้ได้ปกติ |
+| `1` | LPUART1 (USB ST-Link) | 19200 | ST-Link VCP | ❌ ปิด |
+
+**ตั้งค่าที่ Live Expressions:**
+```
+dev_dash.Ctrl.telemetry_mode = 1   ← สลับมา USB / ปิด Modbus
+dev_dash.Ctrl.telemetry_mode = 0   ← กลับ Modbus ปกติ
+```
+
+**ฝั่ง Simulink:**
+```
+Serial Receive (ระบุ COM port + baud ตามตาราง, 16 bytes)
+  → Byte Unpack
+      bytes [2:5]   → float → position (rad)
+      bytes [6:9]   → float → velocity (rad/s)
+      bytes [10:13] → float → acceleration (rad/s²)
 ```
 
 ---

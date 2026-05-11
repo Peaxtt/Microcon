@@ -35,6 +35,9 @@ Flash โค้ดด้วยปุ่ม **Debug (🐞)** แล้ว Add exp
       motor_cmd        = 0.0      ← Speed สุทธิที่ส่งออกจริง (signed)
       encoder          = 0        ← Absolute position (counts, TI12 mode)
       current_A        = 0.0000   ← กระแสมอเตอร์ (Amperes, float)
+      pos_rad          = 0.0      ← ตำแหน่ง (rad) — ตรงกับที่ส่งไป Simulink
+      vel_rad_s        = 0.0      ← ความเร็ว (rad/s)
+      acc_rad_s2       = 0.0      ← ความเร่ง (rad/s²)
   ▼ In
       estop            = 1        ← 1=ปกติ, 0=กด
       mode_switch      = 0/1
@@ -112,34 +115,101 @@ WCS1800 บน PC4 (ADC2_IN5), VCC=5V
 
 ---
 
-## สิ่งที่ Control Team ต้อง Implement
+## Joystick Test Mode (Mode 2) — Button Layout ปัจจุบัน
 
-### 1. STATE_CALIBRATE (Homing)
+| ปุ่ม | Output | Pin |
+|------|--------|-----|
+| BTN_A | EMER_OUTPUT | PB14 |
+| BTN_B | POWER_LATCH | PB6 |
+| BTN_X | PNEUMATIC | PC6 |
+| BTN_Y | GRIPPER | PB11 |
+| DPAD_UP | TOWER_G | PC7 |
+| DPAD_DOWN | TOWER_Y | PB7 |
+| DPAD_LEFT | TOWER_R | PC8 |
+| DPAD_RIGHT | RESET_LED | PB4 |
+| RT (กำ) + LY | มอเตอร์ | PA6 PWM |
+
+---
+
+## STATE_AUTO — Trajectory + Cascade PID (Implemented ✅)
+
+ใช้ SCURVE.c/h + TRAPEZOID.c/h จาก Control Team integrate เข้า STATE_AUTO แล้ว
+
+### วิธีใช้ (ผ่าน Live Expressions)
+
+```
+▼ dev_dash
+  ▼ Auto
+    — COMMANDS (write) —
+    target_deg    = 90.0   ← เป้าหมาย (องศาจาก home)
+    start_move    = 1      ← set 1 เพื่อ trigger (auto-clear)
+    traj_type     = 0      ← 0=Trapezoid, 1=S-Curve, 2=Direct PID (ไม่มี trajectory)
+    time_mode     = 0      ← 0=constraint-based, 1=time-based
+    — Trajectory limits (time_mode=0) —
+    v_max         = 1.57   ← rad/s (~0.25 rev/s)
+    a_max         = 3.14   ← rad/s²
+    j_max         = 10.0   ← rad/s³ (S-Curve เท่านั้น)
+    — Trajectory times (time_mode=1) —
+    t1_seg        = 0.314  ← S-Curve: jerk duration (s)
+    t2_seg        = 0.186  ← S-Curve: const-accel (s)
+    t_acc_seg     = 0.500  ← Trapezoid: accel (s)
+    t_cruise_seg  = 1.186  ← cruise duration (s)
+    — PID gains —
+    kp_vel = 5.0   ki_vel = 0.1   kd_vel = 0.0
+    kp_pos = 1.0   ki_pos = 0.0   kd_pos = 0.0
+    — STATUS (read) —
+    pos_rad       ← position ปัจจุบัน (rad)
+    vel_rad_s     ← velocity ปัจจุบัน (rad/s)
+    pos_ideal     ← trajectory reference (rad)
+    pos_err       ← position error (rad)
+    vel_sp        ← velocity setpoint (rad/s)
+    pwm_out       ← motor command ออก (-1.0 ถึง 1.0)
+    traj_active   ← 1=กำลังวิ่ง, 0=หยุดแล้ว
+```
+
+### ขั้นตอนทดสอบ (แนะนำเริ่มจาก traj_type=2)
+
+**Phase 1 — Direct Position PID (traj_type=2):** เร็วที่สุด ไม่มีตัวแปรของ trajectory
+1. Enter STATE_AUTO ผ่าน Modbus `0x01 = 0x04` หรือ MODE switch
+2. `traj_type = 2`, `kp_pos = 1.0`, `ki_pos = 0`, `kp_vel = 5`
+3. `target_deg = 90` → `start_move = 1`
+4. ดู `pos_err` และ `pwm_out` — ถ้าสั่นให้ลด `kp_vel`, ถ้าช้าให้เพิ่ม `kp_pos`
+5. ค่อยๆ เพิ่ม `ki_pos` เพื่อกำจัด steady-state error
+
+**Phase 2 — Trapezoidal (traj_type=0):** เพิ่ม smooth acceleration
+1. ใช้ gain ที่ได้จาก Phase 1
+2. `traj_type = 0`, ตั้ง `v_max`, `a_max` ตามต้องการ
+3. `target_deg = 90` → `start_move = 1`
+
+**Phase 3 — S-Curve (traj_type=1):** smoothest
+1. เพิ่ม `j_max` (default 10 rad/s³)
+
+### ⚠️ Note: Loop Rate Difference
+- Control Team tune gains ที่ **1kHz**
+- เราใช้ **100Hz** (main loop)
+- ผลกระทบ: `kp_vel=30` ของเพื่อนอาจ oscillate ในระบบของเรา
+- แนะนำเริ่ม `kp_vel=5` แล้วค่อยเพิ่ม
+
+### ⚠️ Note: เพิ่มไฟล์ใน CubeIDE
+ต้อง Add `SCURVE.c` และ `TRAPEZOID.c` เข้า build:
+Project Explorer → คลิกขวา `Core/Src` → `Add Existing Files`
+
+### STATE_CALIBRATE (Homing — ยังต้อง implement)
 ```c
 case STATE_CALIBRATE:
-    motor_speed_cmd = 0.1f; // เคลื่อนไปหา Home sensor
-    // เมื่อ HOME sensor ตรวจจับ:
-    //   __HAL_TIM_SET_COUNTER(&htim1, 32768); // reset encoder ไปกลาง range
+    motor_speed_cmd = -0.1f; // เคลื่อนไปหา Home sensor
+    // เมื่อ HOME sensor trigger:
     //   current_position = 0;
     //   current_state = STATE_IDLE;
     break;
 ```
 
-### 2. STATE_AUTO (PID Position Control)
-```c
-case STATE_AUTO:
-    // ใส่ PID ที่นี่
-    int32_t error = target_position - current_position;
-    motor_speed_cmd = Kp * error + Ki * integral + Kd * derivative;
-    // Clamp: motor_speed_cmd อยู่ใน -1.0 ถึง +1.0
-    break;
-```
-
-### 3. Global Variables ที่ใช้ได้
+### Global Variables ที่ใช้ได้
 ```c
 extern float    motor_speed_cmd;   // สั่งความเร็ว (-1.0 ถึง +1.0)
-extern int32_t  current_position;  // ตำแหน่ง encoder (อัพเดททุก 1ms)
-extern float    current_sensor_A;  // กระแส (Amperes, อัพเดททุก 10ms)
+extern int32_t  current_position;  // encoder counts (อัพเดททุก 1ms)
+extern float    current_sensor_A;  // กระแส Amperes (อัพเดททุก 10ms)
+extern float    ctrl_vel_rad_s;    // velocity (rad/s, windowed @1kHz)
 ```
 
 ---

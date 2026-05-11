@@ -97,21 +97,26 @@
 ## Key Variables (Control Team ใช้)
 
 ```c
-// เขียน — สั่งความเร็วมอเตอร์
-extern float   motor_speed_cmd;    // -1.0 (full reverse) ถึง +1.0 (full forward)
+// Motor
+extern float   motor_speed_cmd;    // เขียน: -1.0 ถึง +1.0
 
-// อ่าน — ตำแหน่ง encoder (อัพเดทที่ 1kHz, ไม่ overflow)
-extern int32_t current_position;   // encoder counts, TI12 mode (4x resolution)
+// Encoder & Motion (อัพเดท @1kHz ใน TIM7 ISR)
+extern int32_t current_position;   // counts, TI12 4x (8192 counts/rev)
+extern float   ctrl_vel_rad_s;     // velocity (rad/s), windowed 10ms
+extern float   ctrl_acc_rad_s2;    // acceleration (rad/s²), LPF
 
-// อ่าน — กระแสมอเตอร์ (อัพเดทที่ 100Hz)
-extern float   current_sensor_A;   // Amperes, float, ~4 decimal places
+// Current (อัพเดท @100Hz)
+extern float   current_sensor_A;   // Amperes
 ```
 
-**Pipeline ที่ `motor_speed_cmd` ผ่านก่อนออก PWM จริง:**
+**Unit:** `pos_rad = current_position × (2π/8192)`
+
+**Pipeline (Non-AUTO):**
 ```
-motor_speed_cmd → [Max Speed Cap] → [Direction Dead-time 50ms] → [Slew Ramp] → PWM
+motor_speed_cmd → [Max Speed Cap] → [Dead-time 50ms] → [Slew Ramp] → PWM
 ```
-ปรับ runtime ได้ผ่าน `dev_dash.Ctrl.max_speed` และ `dev_dash.Ctrl.ramp_rate`
+
+**STATE_AUTO:** PID รันใน TIM7 ISR @1kHz → SET_COMPARE โดยตรง (ข้าม slew)
 
 ---
 
@@ -137,12 +142,29 @@ Flash ด้วย Debug (🐞) → Live Expressions → Add: dev_dash
   ▼ Status         ← อ่าน real-time
       state                 STATE_IDLE / MANUAL / AUTO / EMER
       motor_cmd             speed จริงที่ออก (signed)
-      encoder               ตำแหน่ง encoder (int32)
+      encoder               ตำแหน่ง encoder (int32, counts)
       current_A             กระแส (Amperes)
+      pos_rad               ตำแหน่ง (rad) — ตรงกับที่ส่งไป Simulink
+      vel_rad_s             ความเร็ว (rad/s)
+      acc_rad_s2            ความเร่ง (rad/s²)
   ▼ In             ← สถานะปุ่มและ switch
       estop / mode_switch / reset / power
   ▼ Out            ← สถานะ output จริง
       pwm/dir/pneumatic/gripper/tower_g/y/r
+  ▼ Auto           ← STATE_AUTO trajectory + PID (เขียน/อ่าน real-time)
+      target_deg            เป้าหมาย (องศา)
+      start_move            set 1 เพื่อ trigger move
+      traj_type             0=Trapezoid · 1=S-Curve · 2=Direct PID (ไม่มี trajectory)
+      time_mode             0=constraint-based · 1=time-based
+      v_max / a_max / j_max ← trajectory limits
+      kp_vel / ki_vel / kd_vel ← velocity PID gains
+      kp_pos / ki_pos / kd_pos ← position PID gains
+      — อ่าน status —
+      pos_rad / vel_rad_s   ← feedback (rad, rad/s)
+      pos_ideal / vel_ideal ← trajectory reference
+      pos_err / vel_sp      ← error / velocity setpoint
+      pwm_out               ← final motor command
+      traj_active           ← 1=กำลังวิ่ง
 ```
 
 ---
@@ -156,15 +178,17 @@ Flash ด้วย Debug (🐞) → Live Expressions → Add: dev_dash
 | **PA8** | ENCODER_B | TIM1_CH1 · Encoder TI12 |
 | **PA9** | ENCODER_A | TIM1_CH2 · Encoder TI12 |
 | **PC4** | CURRENT_SENSOR | ADC2_IN5 · WCS1800 (VCC=5V) |
-| **PB13** | ESTOP | EXTI Falling → STATE_EMER ทันที |
-| **PB5** | MODE | EXTI · Auto/Manual selector |
+| **PB13** | ESTOP | EXTI Falling → STATE_EMER ทันที (PULLUP override ใน code) |
+| **PB5** | MODE | EXTI · Auto/Manual selector (PULLUP override ใน code) |
 | **PA1/PA4/PB0** | REED_UP/DOWN/GRIP | Digital Input Pull-up |
-| **PC1/PB11** | PNEUMATIC/GRIPPER | Digital Output |
+| **PC6/PB11** | PNEUMATIC/GRIPPER | Digital Output |
 | **PC7/PC8/PB7** | TOWER G/R/Y | Tower Light |
-| **PB6** | EMER_OUTPUT | HIGH เมื่อ E-Stop active |
-| **PB14** | POWER_LATCH | ล็อคไฟ (SET=ON ตอน startup) |
+| **PB14** | EMER_OUTPUT | HIGH เมื่อ E-Stop active |
+| **PB6** | POWER_LATCH | ล็อคไฟ (SET=ON ตอน startup, ปัจจุบัน comment ออก) |
 | **PA2/PA3** | LPUART1 TX/RX | Modbus RTU 19200 8E1 |
 | **PC10/PC11** | USART3 TX/RX | Joystick 460800 8N1 |
+| **PB9/PB8** | UART4 TX/RX | Telemetry → Simulink 115200 (ต้องใช้ adapter) |
+| **LPUART1** | USB ST-Link | Telemetry → Simulink 19200 เมื่อ `telemetry_mode=1` |
 
 > Pin mapping ครบถ้วน → [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md)
 

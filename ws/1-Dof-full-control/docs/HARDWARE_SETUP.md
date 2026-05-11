@@ -35,14 +35,14 @@
 ### Digital Outputs
 | Pin | Label | Type | หมายเหตุ |
 |-----|-------|------|---------|
-| PC1 | PNEUMATIC | GPIO Output | กระบอกลม Up/Down |
+| PC6 | PNEUMATIC | GPIO Output (PullDown) | กระบอกลม Up/Down |
 | PB11 | GRIPPER | GPIO Output | Gripper Close/Open |
 | PB4 | RESET_LED | GPIO Output | LED แสดงสถานะ Reset |
 | PC7 | TOWER_G | GPIO Output | Tower Light: Green |
 | PC8 | TOWER_R | GPIO Output | Tower Light: Red |
 | PB7 | TOWER_Y | GPIO Output | Tower Light: Yellow |
-| PB6 | EMER_OUTPUT | GPIO Output | สัญญาณ output ฉุกเฉิน (HIGH เมื่อ EMER) |
-| PB14 | POWER_LATCH | GPIO Output | ล็อคไฟระบบ (ต้อง SET ตอน startup สำหรับ standalone) |
+| PB14 | EMER_OUTPUT | GPIO Output | สัญญาณ output ฉุกเฉิน (HIGH เมื่อ EMER) |
+| PB6 | POWER_LATCH | GPIO Output | ล็อคไฟระบบ (ต้อง SET ตอน startup สำหรับ standalone) |
 | PA5 | LD2 | GPIO Output | Nucleo onboard LED (Heartbeat blink) |
 
 ### Communication
@@ -52,6 +52,19 @@
 | PA3 | LPUART1_RX | LPUART1 | Modbus RTU, 19200 8E1, DMA |
 | PC10 | USART3_TX | USART3 | Joystick XInput, 460800 8N1, DMA |
 | PC11 | USART3_RX | USART3 | Joystick XInput, 460800 8N1, DMA |
+| PB9 | UART4_TX | UART4 | Telemetry → Simulink, 115200 8N1 (ต้องใช้ USB-UART adapter) |
+| PB8 | UART4_RX | UART4 | Telemetry ← Simulink, 115200 8N1 (ต้องใช้ USB-UART adapter) |
+
+> UART4 init ด้วย code ใน `USER CODE BEGIN 4` (ไม่ผ่าน .ioc) AF8 บน GPIOB
+
+**Telemetry Mode Switch (`dev_dash.Ctrl.telemetry_mode`):**
+
+| ค่า | UART ที่ใช้ส่ง | Modbus | วิธีเชื่อม Simulink |
+|-----|-------------|--------|-------------------|
+| `0` (default) | UART4 (PB9) | ทำงานปกติ | USB-UART adapter → COM port ที่ 115200 |
+| `1` | LPUART1 (USB ST-Link) | หยุดทำงาน | สาย Micro USB เดิม → ST-Link VCP COM port ที่ 19200 |
+
+สลับได้ตลอดใน Live Expressions ไม่ต้อง flash ใหม่
 
 ---
 

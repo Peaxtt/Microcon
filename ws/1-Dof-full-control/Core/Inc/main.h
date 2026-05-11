@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define RESET_BTN_Pin GPIO_PIN_13
+#define RESET_BTN_GPIO_Port GPIOC
 #define RCC_OSC32_IN_Pin GPIO_PIN_14
 #define RCC_OSC32_IN_GPIO_Port GPIOC
 #define RCC_OSC32_OUT_Pin GPIO_PIN_15
@@ -67,6 +69,8 @@ void Error_Handler(void);
 #define RCC_OSC_IN_GPIO_Port GPIOF
 #define RCC_OSC_OUT_Pin GPIO_PIN_1
 #define RCC_OSC_OUT_GPIO_Port GPIOF
+#define POWER_LATCH_Pin GPIO_PIN_1
+#define POWER_LATCH_GPIO_Port GPIOC
 #define MOTOR_DIR_Pin GPIO_PIN_0
 #define MOTOR_DIR_GPIO_Port GPIOA
 #define REED_UP_Pin GPIO_PIN_1
@@ -81,8 +85,6 @@ void Error_Handler(void);
 #define LD2_GPIO_Port GPIOA
 #define REED_GRIP_Pin GPIO_PIN_0
 #define REED_GRIP_GPIO_Port GPIOB
-#define RESET_BTN_Pin GPIO_PIN_1
-#define RESET_BTN_GPIO_Port GPIOB
 #define POWER_BTN_Pin GPIO_PIN_10
 #define POWER_BTN_GPIO_Port GPIOB
 #define GRIPPER_Pin GPIO_PIN_11
@@ -90,8 +92,8 @@ void Error_Handler(void);
 #define ESTOP_Pin GPIO_PIN_13
 #define ESTOP_GPIO_Port GPIOB
 #define ESTOP_EXTI_IRQn EXTI15_10_IRQn
-#define POWER_LATCH_Pin GPIO_PIN_14
-#define POWER_LATCH_GPIO_Port GPIOB
+#define EMER_OUTPUT_Pin GPIO_PIN_14
+#define EMER_OUTPUT_GPIO_Port GPIOB
 #define PNEUMATIC_Pin GPIO_PIN_6
 #define PNEUMATIC_GPIO_Port GPIOC
 #define TOWER_G_Pin GPIO_PIN_7
@@ -109,8 +111,6 @@ void Error_Handler(void);
 #define MODE_Pin GPIO_PIN_5
 #define MODE_GPIO_Port GPIOB
 #define MODE_EXTI_IRQn EXTI9_5_IRQn
-#define EMER_OUTPUT_Pin GPIO_PIN_6
-#define EMER_OUTPUT_GPIO_Port GPIOB
 #define TOWER_Y_Pin GPIO_PIN_7
 #define TOWER_Y_GPIO_Port GPIOB
 
