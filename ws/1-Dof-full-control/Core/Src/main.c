@@ -226,7 +226,7 @@ DevDashboard_t dev_dash = {
   .Ctrl.auto_speed         = 0.30f,
   .Ctrl.auto_period_fwd_ms = 1000,
   .Ctrl.auto_period_rev_ms = 1000,
-  .Ctrl.cur_zero_v      = 2.5f,
+  .Ctrl.cur_zero_v      = 2.46f,
   .Ctrl.cur_sens        = 0.066f,
   .Ctrl.telemetry_mode  = 0,   // 0=Modbus, 1=Simulink via USB
   .Ctrl.acc_alpha       = 0.2f, // acceleration LPF (0.1=smooth, 0.5=fast)
@@ -248,6 +248,8 @@ DevDashboard_t dev_dash = {
   .Auto.ki_pos        = 0.0f,
   .Auto.kd_pos        = 0.0f,
 };
+
+static float filtered_adc = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -376,6 +378,24 @@ int main(void)
   // Calibrate ADC2 before using it
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
   
+  	// =======================================================
+    // Auto-Zero Calibration:
+    // =======================================================
+    float sum_voltage = 0.0f;
+    for (int i = 0; i < 100; i++) {
+        if (HAL_ADC_Start(&hadc2) == HAL_OK) {
+            if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
+                uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
+                float temp_v = ((float)raw_adc / 4095.0f) * 3.3f;
+                sum_voltage += temp_v;
+            }
+            HAL_ADC_Stop(&hadc2);
+        }
+        HAL_Delay(2); // รอ 2ms
+    }
+    dev_dash.Ctrl.cur_zero_v = sum_voltage / 100.0f; // ตั้งค่า Zero แบบ Real-time
+    // =======================================================
+
   printf("\r\n=== 1-DOF Robot System Ready ===\r\n");
 
   // Init trajectory generators (dt=0.001s for 1kHz ISR)
@@ -411,20 +431,33 @@ int main(void)
       }
       
       // 1. Read ADC Current Sensor (with Moving Average Filter)
-      if (HAL_ADC_Start(&hadc2) == HAL_OK) {
-        if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
-          uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
-          static float filtered_adc = 0;
-          if (filtered_adc == 0) filtered_adc = raw_adc;
-          filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
-          // WCS1800: ปรับ cur_zero_v และ cur_sens ใน dev_dash.Ctrl ได้ real-time
-          float v = (filtered_adc / 4095.0f) * 3.3f;
-          float i_a = (v - dev_dash.Ctrl.cur_zero_v) / dev_dash.Ctrl.cur_sens;
-          if (i_a < 0.0f) i_a = -i_a;
-          current_sensor_A = i_a; // Amperes (float, 4 decimal places)
-        }
-      }
+            if (HAL_ADC_Start(&hadc2) == HAL_OK) {
+              if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
+                uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
 
+                static float filtered_adc = 0.0f;
+                static uint8_t is_first_read = 1;
+
+                if (is_first_read) {
+                    filtered_adc = (float)raw_adc;
+                    is_first_read = 0;
+                } else {
+                    filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
+                }
+
+                // แปลงเป็นโวลต์ (ใช้ 3.3V)
+                float v = (filtered_adc / 4095.0f) * 3.3f;
+
+                // คำนวณกระแส โดยใช้ cur_zero_v ที่ได้จากการ Calibrate ตัวเองตอนเปิดเครื่อง
+                float i_a = (v - dev_dash.Ctrl.cur_zero_v) / dev_dash.Ctrl.cur_sens;
+
+                if (i_a < 0.0f) i_a = -i_a; // ทำให้กระแสเป็นบวกเสมอ
+                current_sensor_A = i_a;
+              }
+
+              // เคลียร์ State ของ ADC ป้องกันอ่านค้างในลูปรอบถัดไป
+              HAL_ADC_Stop(&hadc2);
+            }
       // 2. Process incoming Modbus frames (Always ON in Multiplexed mode)
       modbus_process(&mb_slave);
 
@@ -1134,10 +1167,10 @@ static void MX_LPUART1_UART_Init(void)
 
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.BaudRate = 19200;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Parity = UART_PARITY_EVEN;
   hlpuart1.Init.Mode = UART_MODE_TX_RX;
   hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -1242,11 +1275,11 @@ static void MX_TIM1_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 15;
+  sConfig.IC1Filter = 0;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 15;
+  sConfig.IC2Filter = 0;
   if (HAL_TIM_Encoder_Init(&htim1, &sConfig) != HAL_OK)
   {
     Error_Handler();
