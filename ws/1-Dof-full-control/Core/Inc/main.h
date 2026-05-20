@@ -119,21 +119,18 @@ void Error_Handler(void);
  * NEW PERIPHERALS — configure in IOC before uncommenting
  * ========================================================= */
 
-/* --- CAN Bus (FDCAN1) -----------------------------------
- * IOC: Connectivity → FDCAN1 → Activated
- *      PA11 = FDCAN1_RX  (AF9)
- *      PA12 = FDCAN1_TX  (AF9)
- *      Nominal bit-rate: 1 Mbit/s (set Prescaler/Seg in IOC)
- *      Clock source: PCLK1 (170 MHz → prescaler=2, Seg1=42, Seg2=12 → 1M)
+/* --- CAN Bus (FDCAN1) — configured in IOC, handle = hfdcan1 -------------
+ *      PA11 = FDCAN1_RX (AF9),  PA12 = FDCAN1_TX (AF9)
+ *      Nominal: Prescaler=5, Seg1=25, Seg2=8, SJW=2 → 1 Mbit/s @ 170MHz
+ *      Mode: Classic CAN (FDCAN_FRAME_CLASSIC), FDCAN_MODE_NORMAL
+ *      Global filter: accept-all → RX FIFO0
+ *      External transceiver: TJA1050 (TX→TXD, RX←RXD)
  * -------------------------------------------------------- */
 #define CAN_NODE_ID       0x001U   /* This board's CAN node ID */
 
-/* --- RP2040 Mini UART (UART4) ---------------------------
- * IOC: Connectivity → UART4 → Asynchronous, 115200 8N1
- *      PB8 = UART4_RX  (AF8)
- *      PB9 = UART4_TX  (AF8)
+/* --- RP2040 Mini — already connected via USART3 (PC10/PC11) @ 460800 8N1
+ * No additional UART needed.
  * -------------------------------------------------------- */
-#define RP2040_BAUD       115200U  /* Match RP2040 firmware baud rate */
 
 /* --- Reed Switches (already in IOC, wiring change needed)
  * IOC change: PA1 / PA4 / PB0 → change GPIO_PULLUP → GPIO_PULLDOWN

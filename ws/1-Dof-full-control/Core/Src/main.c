@@ -49,6 +49,8 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc2;
 
+FDCAN_HandleTypeDef hfdcan1;
+
 IWDG_HandleTypeDef hiwdg;
 
 UART_HandleTypeDef hlpuart1;
@@ -119,9 +121,7 @@ volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
 volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
 volatile uint8_t reed_grip = 0;   // gripper CLOSED
 
-// CAN Bus and RP2040 UART handles (uncomment after IOC generates them)
-// extern FDCAN_HandleTypeDef hfdcan1;  // PA11(RX) / PA12(TX)
-// extern UART_HandleTypeDef  huart4;   // PB8(RX)  / PB9(TX)
+// CAN Bus handle — declared by CubeMX at top of file (hfdcan1, PA11/PA12)
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -284,6 +284,7 @@ static void MX_TIM7_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
 static void UART4_Init(void);
 static void Send_Telemetry(void);
@@ -360,6 +361,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_ADC2_Init();
   MX_TIM3_Init();
+  MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
   // EMER (ESTOP_Pin): active LOW — pin LOW = กด, ใช้ PULLUP
   // MODE selector: PULLUP (LOW=AUTO, HIGH=MANUAL)
@@ -568,9 +570,9 @@ int main(void)
       }
 
       // 3. Update Status Registers (0x26 - 0x31)
-      mb_slave.registers[0x26] = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port, REED_UP_Pin) == GPIO_PIN_RESET ? 1 : 0) |
-                                 (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == GPIO_PIN_RESET ? 2 : 0) |
-                                 (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == GPIO_PIN_RESET ? 4 : 0);
+      mb_slave.registers[0x26] = (reed_up   ? 1 : 0) |
+                                 (reed_down ? 2 : 0) |
+                                 (reed_grip ? 4 : 0);
       
       mb_slave.registers[0x28] = (int16_t)current_position; 
       mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) ? 1 : 0;
@@ -1296,6 +1298,58 @@ static void MX_ADC2_Init(void)
 }
 
 /**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN1_Init 0 */
+
+  /* USER CODE END FDCAN1_Init 0 */
+
+  /* USER CODE BEGIN FDCAN1_Init 1 */
+
+  /* USER CODE END FDCAN1_Init 1 */
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan1.Init.AutoRetransmission = DISABLE;
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = DISABLE;
+  hfdcan1.Init.NominalPrescaler = 5;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 25;
+  hfdcan1.Init.NominalTimeSeg2 = 8;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 1;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.ExtFiltersNbr = 0;
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN1_Init 2 */
+
+  /* Accept all standard + extended frames into RX FIFO0 (no ID filter needed) */
+  HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+      FDCAN_ACCEPT_IN_RX_FIFO0,   /* non-matching std frames  → FIFO0 */
+      FDCAN_ACCEPT_IN_RX_FIFO0,   /* non-matching ext frames  → FIFO0 */
+      FDCAN_FILTER_REMOTE,
+      FDCAN_FILTER_REMOTE);
+
+  HAL_FDCAN_Start(&hfdcan1);
+
+  /* USER CODE END FDCAN1_Init 2 */
+
+}
+
+/**
   * @brief IWDG Initialization Function
   * @param None
   * @retval None
@@ -1340,10 +1394,10 @@ static void MX_LPUART1_UART_Init(void)
 
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.BaudRate = 19200;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Parity = UART_PARITY_EVEN;
   hlpuart1.Init.Mode = UART_MODE_TX_RX;
   hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -1646,14 +1700,20 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
   GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : REED_GRIP_Pin POWER_BTN_Pin */
-  GPIO_InitStruct.Pin = REED_GRIP_Pin|POWER_BTN_Pin;
+  /*Configure GPIO pin : REED_GRIP_Pin */
+  GPIO_InitStruct.Pin = REED_GRIP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(REED_GRIP_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : POWER_BTN_Pin */
+  GPIO_InitStruct.Pin = POWER_BTN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(POWER_BTN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : GRIPPER_Pin EMER_OUTPUT_Pin RESET_LED_Pin TOWER_Y_Pin */
   GPIO_InitStruct.Pin = GRIPPER_Pin|EMER_OUTPUT_Pin|RESET_LED_Pin|TOWER_Y_Pin;
