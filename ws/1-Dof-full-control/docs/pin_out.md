@@ -1,60 +1,163 @@
-# 🤖 Project Context: 1-DOF Robot Control System (Hardware-PCB Mapped)
+# Pin Reference — 1-DOF Robot Control (STM32G474RETx)
 
-**Microcontroller:** STM32G474RE (Nucleo-G474RE)
-**Control Strategy:** Current/Torque Control using ADC + PI Controller
-
----
-
-## 1. 📍 Hardware Pin Mapping (อิงตามสกรีนบนแผ่น PCB)
-
-### 🔴 ฝั่งซ้าย (Header 8 ช่อง)
-| ชื่อบน PCB (Label) | STM32 Pin | IO Type | หน้าที่การทำงาน (Function) |
-| :--- | :--- | :--- | :--- |
-| **`LM2`** | PB1 | Input | รับสัญญาณ Limit 1 (หรือปุ่ม Reset) |
-| **`EMER`** | PB13 | EXTI (Priority 0) | รับสัญญาณปุ่ม E-Stop (จาก Opto) |
-| **`PROX`** | PB5 | EXTI (Priority 0) | รับสัญญาณ Proximity / Home (จาก Opto) |
-| **`IR`** | PB4 | Output | ส่งสัญญาณคุมไฟ LED ปุ่ม Reset (ไป Relay ช่อง 6) |
-| **`LM1`** | PB10 | Input | รับสัญญาณปุ่ม Power (จาก Opto) |
-| **`EN1`** | PB7 | Output | ส่งสัญญาณไฟ Tower Light สีเหลือง (ไป Relay ช่อง 2) |
-| **`Servo`** | PC8 | Output | ส่งสัญญาณไฟ Tower Light สีแดง (ไป Relay ช่อง 3) |
-| **`EN2`** | PC6 *(แนะนำ)*| Output | ✨ **EMER_OUTPUT:** ว่างอยู่! เอามาส่งสัญญาณไปตัด Relay ช่อง 8 (Software E-Stop) |
-
-### 🔴 ฝั่งขวา (Header 10 ช่อง)
-| ชื่อบน PCB (Label) | STM32 Pin | IO Type | หน้าที่การทำงาน (Function) |
-| :--- | :--- | :--- | :--- |
-| **`EN+`** | PA6 | PWM (TIM3) | ส่งสัญญาณ PWM ไป Cytron (สายสีขาว) |
-| *(ใต้ EN+)* | PC5 | ADC1_IN11 | รับสัญญาณ Current Sensor |
-| **`PRIS`** | PA1 | Output | ส่งสัญญาณ Direction ไป Cytron (สายสีเหลือง) |
-| **`DEL`** | PC1 | Output | สั่ง Gripper Up/Down (ไป Relay ช่อง 4) |
-| **`SAVE`** | PB11 | Output | สั่ง Gripper Close/Open (ไป Relay ช่อง 5) |
-| **`HOME`** | PC0 | Input | รับสัญญาณปุ่ม Mode (จาก Opto) |
-| **`DI`** | PC7 | Output | ส่งสัญญาณไฟ Tower Light สีเขียว (ไป Relay ช่อง 1) |
-| **`O2 (บน)`** | PA9 | TIM1_CH2 | รับสัญญาณ Encoder A (สายเหลือง 8 คอร์) |
-| **`O2 (ล่าง)`**| PA8 | TIM1_CH1 | รับสัญญาณ Encoder B (สายเขียว 8 คอร์) |
-| **`RPT`** | PB14 | Output | **POWER_LATCH:** สั่งปิดเครื่อง (ไป Relay ช่อง 7) |
-
-### 🔴 พินดำแยก (จิ้มตรงบนบอร์ด) & พอร์ตสื่อสาร
-| ชื่อจุดเชื่อมต่อ | STM32 Pin | IO Type | หน้าที่การทำงาน (Function) |
-| :--- | :--- | :--- | :--- |
-| **พินดำ (REED_U)** | PA0 | Input | รับสัญญาณ Test Station: Reed Up |
-| **พินดำ (REED_D)** | PA4 | Input | รับสัญญาณ Test Station: Reed Down |
-| **พินดำ (REED_G)** | PB0 | Input | รับสัญญาณ Test Station: Reed Gripper |
-| **USB (ST-Link)** | PA2, PA3 | LPUART1 | ส่งข้อมูล Modbus UI |
-| **พินดำ (UART)** | PC10, PC11| USART3 | รับส่งข้อมูล Joystick (ย้ายหนี PB10/PB11) |
+**MCU:** STM32G474RET6 (LQFP64)  
+**Board:** NUCLEO-G474RE (dev) → custom PCB (prod)  
+**Last updated:** 2026-05-21
 
 ---
 
-## 2. ⚡ NVIC Priority & Architecture (4-bit Preemption)
-* **Priority 0 (Safety First):** `EXTI15:10` (PB13 EMER), `EXTI9:5` (PB5 PROX), `ADC1` (Current Sensor).
-* **Priority 1 (Feedback):** `TIM1` (Encoder PA8, PA9).
-* **Priority 2 (Control Loop):** `TIM7` (1kHz loop for PI Current Control).
-* **Priority 3 (Communication):** `LPUART1`, `USART3`.
-* **Priority 15 (System):** `TIM2` (HAL Timebase).
+## Current Pin Assignments (from IOC)
+
+### Power & System
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PA5 | LD2 | Output | Push-Pull | Onboard debug LED |
+| PC13 | RESET_BTN | Input | PULLUP | Reset button (active LOW) |
+| PC1 | POWER_LATCH | Output | Push-Pull | Power latch / cylinder DOWN actuator |
+| PB10 | POWER_BTN | Input | PULLUP | Power button (active LOW) |
+| PB4 | RESET_LED | Output | Push-Pull | Reset LED indicator |
+
+### Motor Control
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PA6 | (TIM3_CH1) | PWM | TIM3 CH1 | Motor PWM 20kHz (period=8499) |
+| PA0 | MOTOR_DIR | Output | Push-Pull | Motor direction (Cytron DIR) |
+| PA8 | (TIM1_CH1) | Encoder | TIM1 Enc | Encoder channel A |
+| PA9 | (TIM1_CH2) | Encoder | TIM1 Enc | Encoder channel B |
+
+### Safety
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PC2 | ESTOP | Input | NOPULL | Emergency stop input — active LOW, debounced 30ms |
+| PB14 | EMER_OUTPUT | Output | Push-Pull | Software E-Stop output relay |
+
+### Actuators (outputs)
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PB11 | GRIPPER | Output | Push-Pull | Gripper close/open solenoid |
+| PC6 | PNEUMATIC | Output | Push-Pull | Pneumatic solenoid (aux) |
+
+### Tower Lights
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PC7 | TOWER_G | Output | Push-Pull | Tower light — Green |
+| PB7 | TOWER_Y | Output | Push-Pull | Tower light — Yellow |
+| PC8 | TOWER_R | Output | Push-Pull | Tower light — Red |
+
+### Reed Switches (digital inputs)
+| Pin | Label | Direction | Config | Function |
+|-----|-------|-----------|--------|----------|
+| PA1 | REED_UP | Input | **PULLDOWN** | Cylinder UP end-stop — active LOW |
+| PA4 | REED_DOWN | Input | **PULLDOWN** | Cylinder DOWN end-stop — active LOW |
+| PB0 | REED_GRIP | Input | **PULLDOWN** | Gripper CLOSED sensor — active LOW |
+
+> **Wiring:** NC contact. COM → board 3V3. NC pin → GPIO.  
+> Normal (no magnet): NC closed → 3V3 on GPIO → HIGH.  
+> Triggered (magnet): NC opens → PULLDOWN → LOW.  
+> `reed_up/down/grip = 1` means position reached.
+
+> **IOC TODO:** Change PA1, PA4, PB0 from `GPIO_PULLUP` → `GPIO_PULLDOWN`
+
+### Communication
+| Pin | Label | Direction | Peripheral | Function |
+|-----|-------|-----------|------------|----------|
+| PA2 | LPUART1_TX | TX | LPUART1 | Modbus + Telemetry → PC (115200 8N1) |
+| PA3 | LPUART1_RX | RX | LPUART1 | Modbus RX ← PC |
+| PC10 | USART3_TX | TX | USART3 | Joystick bridge TX (460800 8N1) |
+| PC11 | USART3_RX | RX | USART3 | Joystick bridge RX ← RP2040/XInput |
+
+### Analog
+| Pin | Label | Direction | Peripheral | Function |
+|-----|-------|-----------|------------|----------|
+| PC4 | (ADC2_IN5) | Analog In | ADC2 | Current sensor |
+
+### Debug (SWD)
+| Pin | Label | Peripheral |
+|-----|-------|------------|
+| PA13 | T_SWDIO | SWD |
+| PA14 | T_SWCLK | SWD |
+| PB3 | T_SWO | SWO trace |
 
 ---
 
-## 3. 🛠️ Strict Instructions for AI Assistant:
-1. Always use the STM32 HAL Library and strictly follow the Pin mapping matched with the PCB labels above.
-2. Ensure the PI Current Controller runs inside the `TIM7` (1kHz) interrupt.
-3. If `PB13` (EMER) is triggered or ADC detects over-current, immediately halt PWM and enter `STATE_ERROR`.
-4. If the Joystick Software E-Stop is pressed, pull `PC6` (`EN2` / EMER_OUTPUT) HIGH to cut the hardware relay on Channel 8.
+## New Pins — Needs IOC Config
+
+### CAN Bus (FDCAN1)
+| Pin | Label | AF | Function |
+|-----|-------|----|----------|
+| PA11 | FDCAN1_RX | AF9 | CAN Bus receive |
+| PA12 | FDCAN1_TX | AF9 | CAN Bus transmit |
+
+**IOC steps:**
+1. Connectivity → FDCAN1 → Activated
+2. PA11 = FDCAN1_RX, PA12 = FDCAN1_TX (AF9 auto-assigned)
+3. Nominal bit-rate: 1 Mbit/s  
+   Clock = PCLK1 (170 MHz) → Prescaler=2, TimeSeg1=42, TimeSeg2=12, SJW=1
+4. NVIC: enable FDCAN1_IT0_IRQn (priority 3)
+5. External transceiver: SN65HVD230 or TJA1050  
+   STM32 FDCAN1_TX → TXD, FDCAN1_RX ← RXD
+
+**Code:** `hfdcan1` handle generated by CubeMX. Uncomment extern in `main.c`.
+
+---
+
+### RP2040 UART (UART4)
+| Pin | Label | AF | Function |
+|-----|-------|----|----------|
+| PB8 | UART4_RX | AF8 | Receive from RP2040 |
+| PB9 | UART4_TX | AF8 | Transmit to RP2040 |
+
+**IOC steps:**
+1. Connectivity → UART4 → Asynchronous
+2. PB8 = UART4_RX, PB9 = UART4_TX (AF8 auto-assigned)
+3. Baud rate: 115200, 8N1 (match RP2040 firmware)
+4. Enable DMA RX if needed (DMA1_Channel4)
+
+**Code:** `huart4` handle generated by CubeMX. Uncomment extern in `main.c`.
+
+---
+
+## Free Pins (available for new PCB)
+
+| Pin | Notes |
+|-----|-------|
+| PA10 | USART1_RX (AF7) option |
+| PA11 | **→ assigned FDCAN1_RX** |
+| PA12 | **→ assigned FDCAN1_TX** |
+| PA15 | FDCAN3_TX or GPIO |
+| PB1 | GPIO |
+| PB2 | GPIO |
+| PB6 | USART1_TX (AF7) option |
+| PB8 | **→ assigned UART4_RX** |
+| PB9 | **→ assigned UART4_TX** |
+| PB12 | FDCAN2_RX (AF9) or GPIO |
+| PB13 | FDCAN2_TX (AF9) or GPIO (was old ESTOP, freed) |
+| PB15 | GPIO |
+| PC0 | GPIO |
+| PC3 | GPIO |
+| PC5 | USART1_RX (AF7) or GPIO |
+| PC9 | GPIO |
+| PC12 | GPIO |
+| PD2 | GPIO |
+
+---
+
+## IOC Change Checklist (do before next build)
+
+- [ ] **PA1** REED_UP: `GPIO_PULLUP` → `GPIO_PULLDOWN`
+- [ ] **PA4** REED_DOWN: `GPIO_PULLUP` → `GPIO_PULLDOWN`
+- [ ] **PB0** REED_GRIP: `GPIO_PULLUP` → `GPIO_PULLDOWN`
+- [ ] **FDCAN1**: Add peripheral, assign PA11/PA12, configure 1Mbit/s
+- [ ] **UART4**: Add peripheral, assign PB8/PB9, configure 115200 8N1
+- [ ] After code-gen: uncomment `extern hfdcan1` and `extern huart4` in `main.c`
+
+---
+
+## Interrupt Priority Table
+
+| Priority | IRQ | Source |
+|----------|-----|--------|
+| 0 | EXTI9_5 | PB5 MODE button |
+| 2 | TIM7 | 1kHz control loop |
+| 3 | LPUART1, USART3, DMA1_Ch1-3 | Communication |
+| 15 | TIM2 | HAL timebase |

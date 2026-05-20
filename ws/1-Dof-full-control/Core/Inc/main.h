@@ -71,6 +71,8 @@ void Error_Handler(void);
 #define RCC_OSC_OUT_GPIO_Port GPIOF
 #define POWER_LATCH_Pin GPIO_PIN_1
 #define POWER_LATCH_GPIO_Port GPIOC
+#define ESTOP_Pin GPIO_PIN_2
+#define ESTOP_GPIO_Port GPIOC
 #define MOTOR_DIR_Pin GPIO_PIN_0
 #define MOTOR_DIR_GPIO_Port GPIOA
 #define REED_UP_Pin GPIO_PIN_1
@@ -89,9 +91,6 @@ void Error_Handler(void);
 #define POWER_BTN_GPIO_Port GPIOB
 #define GRIPPER_Pin GPIO_PIN_11
 #define GRIPPER_GPIO_Port GPIOB
-#define ESTOP_Pin GPIO_PIN_13
-#define ESTOP_GPIO_Port GPIOB
-#define ESTOP_EXTI_IRQn EXTI15_10_IRQn
 #define EMER_OUTPUT_Pin GPIO_PIN_14
 #define EMER_OUTPUT_GPIO_Port GPIOB
 #define PNEUMATIC_Pin GPIO_PIN_6
@@ -115,6 +114,35 @@ void Error_Handler(void);
 #define TOWER_Y_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+
+/* =========================================================
+ * NEW PERIPHERALS — configure in IOC before uncommenting
+ * ========================================================= */
+
+/* --- CAN Bus (FDCAN1) -----------------------------------
+ * IOC: Connectivity → FDCAN1 → Activated
+ *      PA11 = FDCAN1_RX  (AF9)
+ *      PA12 = FDCAN1_TX  (AF9)
+ *      Nominal bit-rate: 1 Mbit/s (set Prescaler/Seg in IOC)
+ *      Clock source: PCLK1 (170 MHz → prescaler=2, Seg1=42, Seg2=12 → 1M)
+ * -------------------------------------------------------- */
+#define CAN_NODE_ID       0x001U   /* This board's CAN node ID */
+
+/* --- RP2040 Mini UART (UART4) ---------------------------
+ * IOC: Connectivity → UART4 → Asynchronous, 115200 8N1
+ *      PB8 = UART4_RX  (AF8)
+ *      PB9 = UART4_TX  (AF8)
+ * -------------------------------------------------------- */
+#define RP2040_BAUD       115200U  /* Match RP2040 firmware baud rate */
+
+/* --- Reed Switches (already in IOC, wiring change needed)
+ * IOC change: PA1 / PA4 / PB0 → change GPIO_PULLUP → GPIO_PULLDOWN
+ * Wiring: NC contact, COM = board 3V3
+ *   Normal state (no magnet): NC closed → 3.3V on GPIO → HIGH
+ *   Triggered  (magnet near): NC opens  → PULLDOWN     → LOW
+ * Logic: active LOW = position reached
+ * -------------------------------------------------------- */
+#define REED_ACTIVE  GPIO_PIN_RESET   /* active LOW (NC + PULLDOWN + 3V3 COM) */
 
 /* USER CODE END Private defines */
 

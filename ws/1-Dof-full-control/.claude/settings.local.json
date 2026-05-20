@@ -5,7 +5,15 @@
       "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\main.c\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"htim3\\\\.Instance|MX_TIM3|htim3\\\\.Init\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})",
       "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\stm32g4xx_hal_msp.c\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"MspPostInit|HAL_TIM_PWM_Msp|TIM_PWM|HAL_TIM_Base_Msp|TIM7|TIM3|TIM_Encoder\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})",
       "PowerShell($lines = Get-Content \"D:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\main.h\" -Encoding UTF8; for\\($i=0;$i -lt $lines.Count;$i++\\){if\\($lines[$i] -match \"MspPostInit|TIM3|TIM_PWM\"\\){Write-Host \"$\\($i+1\\): $\\($lines[$i]\\)\"}})",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:github.com)",
+      "Bash(git ls-remote *)",
+      "Bash(gh repo *)",
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\ENCODER.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\ENCODER.c\")",
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Inc\\\\ENCODER.h\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\ENCODER.h\")",
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\SCURVE.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\SCURVE.c\")",
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Inc\\\\SCURVE.h\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\SCURVE.h\")",
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\TRAPEZOID.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\TRAPEZOID.c\")"
     ]
   }
 }

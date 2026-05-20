@@ -1,4 +1,4 @@
-#include "TRAPEZOID.h"
+#include "trapezoid.h"
 
 /* -----------------------------------------------------------------------
  * Public API

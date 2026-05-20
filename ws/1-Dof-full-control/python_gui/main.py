@@ -1,544 +1,918 @@
-import sys
-import struct
-import time
-import queue
-import datetime
+"""
+STM32 S-Curve Tuner — 1-DOF Pendulum Rod
+Single-cable via ST-Link VCP (LPUART1, 19200 8E1)
+
+Telemetry (24 bytes):
+  [0x7E 0x7E][pos f32][vel f32][acc f32][pos_ref f32][vel_ref f32][0x03 0x03]
+
+Modbus RTU FC06, Slave ID=21:
+  Reg 10: STEP_CMD   open-loop PWM step (value × 10000 = motor%)
+  Reg 11: TARGET_POS target rad × 1000 (int16 signed)
+  Reg 12: KP_VEL     kp_vel × 100
+  Reg 13: KI_VEL     ki_vel × 100
+  Reg 14: KD_VEL     kd_vel × 100
+  Reg 15: APPLY      1 = apply all + trigger move (auto-clears)
+  Reg 16: TRAJ_TYPE  1 = S-Curve (forced)
+  Reg 17: V_MAX      v_max × 100
+  Reg 18: A_MAX      a_max × 100
+  Reg 19: J_MAX      j_max × 100
+  Reg 20: KP_POS     kp_pos × 100
+  Reg 21: SET_HOME   1 = set home (auto-clears)
+  Reg 22: KD_POS     kd_pos × 100  (D via -velocity: pendulum damping)
+  Reg 23: KI_POS     ki_pos × 100
+"""
+
+import sys, struct, time, queue, threading, math
+from collections import deque
 import numpy as np
 from scipy.optimize import curve_fit
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                             QGroupBox, QFormLayout, QMessageBox, QScrollArea, QFileDialog)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QGroupBox, QFormLayout, QMessageBox, QScrollArea,
+    QFileDialog, QTabWidget, QCheckBox, QComboBox
+)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
 import pyqtgraph as pg
 import serial
 
-# ==========================================
-# CONSTANTS & ISOLATED REGISTER MAPPING
-# ==========================================
-MODBUS_SLAVE_ID = 21
+# ── Register Map ───────────────────────────────────────────────────────────────
+SLAVE_ID  = 21
+R_STEP    = 10
+R_TARGET  = 11
+R_KP_VEL  = 12
+R_KI_VEL  = 13
+R_KD_VEL  = 14
+R_APPLY   = 15
+R_TRAJ    = 16
+R_VMAX    = 17
+R_AMAX    = 18
+R_JMAX    = 19
+R_KP_POS  = 20
+R_SETHOME = 21
+R_KD_POS  = 22
+R_KI_POS  = 23
+R_STOP    = 25   # หยุดทันที ค้างตำแหน่งปัจจุบัน
 
-REG_STEP_CMD   = 10  
-REG_TARGET_POS = 11
-REG_KP         = 12
-REG_KI         = 13
-REG_KD         = 14
-REG_APPLY      = 15  
+TELEM_BYTES = 24
+MAX_HIST    = 6000   # 120 s @ 50 Hz
+R2D         = 180.0 / math.pi
 
-REG_TRAJ_TYPE  = 16  
-REG_V_MAX      = 17  
-REG_A_MAX      = 18  
-REG_J_MAX      = 19  
+# ── Defaults: ตรงกับ firmware dev_dash init ────────────────────────────────────
+DEF = dict(
+    v_max=3.14, a_max=6.28, j_max=10.0,
+    kp_pos=1.0, ki_pos=0.0, kd_pos=0.0,
+    kp_vel=20.0, ki_vel=0.0, kd_vel=0.0,
+    target_deg=0.0,          # องศา เหมือน firmware
+)
 
-def crc16(data: bytes) -> bytes:
+
+# ── Modbus helpers ─────────────────────────────────────────────────────────────
+def _crc16(data: bytes) -> bytes:
     crc = 0xFFFF
     for b in data:
         crc ^= b
         for _ in range(8):
-            if crc & 1:
-                crc >>= 1
-                crc ^= 0xA001
-            else:
-                crc >>= 1
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
     return struct.pack('<H', crc)
 
-# ==========================================
-# UNIFIED SERIAL THREAD
-# ==========================================
+def _mb_write(reg: int, val: int) -> bytes:
+    pkt = struct.pack('>BBHH', SLAVE_ID, 6, reg, int(val) & 0xFFFF)
+    return pkt + _crc16(pkt)
+
+
+# ── Serial Thread ──────────────────────────────────────────────────────────────
+BAUD_CONFIGS = {
+    "115200 8N1  (firmware เก่า)": (115200, 'N'),
+    "19200  8E1  (firmware ใหม่)": (19200,  'E'),
+}
+
 class SerialThread(QThread):
-    data_received = pyqtSignal(float, float, float)
-    error_signal = pyqtSignal(str)
+    telem   = pyqtSignal(float, float, float, float, float)
+    error   = pyqtSignal(str)
+    pkt_cnt = pyqtSignal(int)   # packet counter for status display
 
-    def __init__(self, port, baudrate=115200):
+    def __init__(self, port, baud=115200, parity='N'):
         super().__init__()
-        self.port = port
-        self.baudrate = baudrate
-        self.serial_port = None
-        self.is_running = False
-        self.tx_queue = queue.Queue()
+        self.port   = port
+        self.baud   = baud
+        self.parity = parity
+        self._ser   = None
+        self._running = False
+        self._q = queue.Queue()
 
-    def send_register(self, addr, val):
-        self.tx_queue.put((addr, val))
+    def send(self, reg, val):
+        self._q.put((reg, val))
 
     def run(self):
         try:
-            self.serial_port = serial.Serial(self.port, self.baudrate, timeout=0.01)
-            self.is_running = True
-            buffer = bytearray()
-            
-            while self.is_running:
-                if self.serial_port.in_waiting > 0:
-                    buffer.extend(self.serial_port.read(self.serial_port.in_waiting))
-                    while len(buffer) >= 16:
-                        if buffer[0] == 0x7E and buffer[1] == 0x7E:
-                            if buffer[14] == 0x03 and buffer[15] == 0x03:
-                                payload = buffer[2:14]
-                                pos, vel, acc = struct.unpack('<fff', payload)
-                                self.data_received.emit(pos, vel, acc)
-                                buffer = buffer[16:] 
-                            else:
-                                buffer.pop(0)
-                        else:
-                            buffer.pop(0)
-                
-                while not self.tx_queue.empty():
-                    addr, val = self.tx_queue.get()
-                    payload = struct.pack('>BBHH', MODBUS_SLAVE_ID, 6, addr, int(val) & 0xFFFF)
-                    payload += crc16(payload)
-                    self.serial_port.write(payload)
-                    time.sleep(0.015) 
-                    
+            par = serial.PARITY_EVEN if self.parity == 'E' else serial.PARITY_NONE
+            self._ser = serial.Serial(
+                self.port, self.baud,
+                parity=par, timeout=0.01
+            )
+            self._running = True
+            buf   = bytearray()
+            count = 0
+            while self._running:
+                if self._ser.in_waiting:
+                    buf.extend(self._ser.read(self._ser.in_waiting))
+
+                # รองรับทั้ง 16-byte (firmware เก่า) และ 24-byte (firmware ใหม่)
+                while len(buf) >= 16:
+                    if buf[0] != 0x7E or buf[1] != 0x7E:
+                        del buf[0:1]
+                        continue
+
+                    if len(buf) >= 24 and buf[22] == 0x03 and buf[23] == 0x03:
+                        pos, vel, acc, pr, vr = struct.unpack('<5f', bytes(buf[2:22]))
+                        self.telem.emit(pos, vel, acc, pr, vr)
+                        del buf[:24]
+                        count += 1; self.pkt_cnt.emit(count)
+
+                    elif buf[14] == 0x03 and buf[15] == 0x03:
+                        pos, vel, acc = struct.unpack('<3f', bytes(buf[2:14]))
+                        self.telem.emit(pos, vel, acc, pos, vel)
+                        del buf[:16]
+                        count += 1; self.pkt_cnt.emit(count)
+
+                    elif len(buf) < 24:
+                        break
+                    else:
+                        del buf[0:1]
+
+                while not self._q.empty():
+                    r, v = self._q.get()
+                    self._ser.write(_mb_write(r, v))
+                    time.sleep(0.018)
                 time.sleep(0.001)
         except Exception as e:
-            self.error_signal.emit(str(e))
+            self.error.emit(str(e))
 
     def stop(self):
-        self.is_running = False
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
+        self._running = False
+        if self._ser and self._ser.is_open:
+            self._ser.close()
 
-# ==========================================
-# MASTERPIECE TUNER (MATH + KD DAMPING)
-# ==========================================
-class MasterpieceTunerThread(QThread):
-    log_signal = pyqtSignal(str)
-    gains_signal = pyqtSignal(float, float, float)
-    finished_signal = pyqtSignal()
-    
-    def __init__(self, main_window):
+
+# ── Safe Incremental Tuner ────────────────────────────────────────────────────
+class TunerThread(QThread):
+    log    = pyqtSignal(str)
+    result = pyqtSignal(dict)
+    done   = pyqtSignal()
+
+    def __init__(self, mw):
         super().__init__()
-        self.mw = main_window 
-        self.is_running = True
-        
-    def write_reg(self, addr, val):
-        if self.mw.serial_thread and self.mw.serial_thread.is_running:
-            self.mw.serial_thread.send_register(addr, val)
+        self.mw          = mw
+        self._alive      = True
+        self._stop_event = threading.Event()
 
-    def set_parameters(self, kp, ki, kd, target_rad):
-        self.write_reg(REG_KP, min(max(int(kp * 100), 0), 65535))
-        self.write_reg(REG_KI, min(max(int(ki * 100), 0), 65535))
-        self.write_reg(REG_KD, min(max(int(kd * 100), 0), 65535))
-        
-        try:
-            v_max = int(float(self.mw.vmax_input.text()) * 100)
-            a_max = int(float(self.mw.amax_input.text()) * 100)
-            j_max = int(float(self.mw.jmax_input.text()) * 100)
-        except:
-            v_max, a_max, j_max = 628, 628, 1256
+    # ── Helpers ────────────────────────────────────────────────────────────────
+    def _sleep(self, s):
+        self._stop_event.wait(timeout=s)
 
-        self.write_reg(REG_TRAJ_TYPE, 1) # S-Curve
-        self.write_reg(REG_V_MAX, v_max)
-        self.write_reg(REG_A_MAX, a_max)
-        self.write_reg(REG_J_MAX, j_max)
-        
-        self.write_reg(REG_TARGET_POS, int(target_rad * 1000) & 0xFFFF)
-        self.write_reg(REG_APPLY, 1)
+    def _send(self, reg, val):
+        if self.mw.serial and self.mw.serial._running:
+            self.mw.serial._q.put((reg, val))
+            time.sleep(0.02)
 
-    def measure_performance(self, target_rad, timeout=3.0):
-        time.sleep(timeout)
-        self.mw.is_tuning = False
-        time.sleep(0.1) 
-        
-        p = np.array(self.mw.tune_pos_data)
-        v = np.array(self.mw.tune_vel_data)
-        a = np.array(self.mw.tune_acc_data)
-        
-        if len(p) < 20: 
-            return None
-        
-        start_pos = p[0]
-        ss_pos = np.mean(p[-15:])
-        ss_error = abs(target_rad - ss_pos)
-        
-        if target_rad >= start_pos: overshoot = max(np.max(p) - target_rad, 0.0)
-        else:                       overshoot = max(target_rad - np.min(p), 0.0)
-            
-        # การสั่นของความเร่งตอนจบ (ยิ่งน้อยแปลว่าเบรกนิ่ม)
-        a_tail = a[-25:]
-        vibration = np.std(a_tail)
-        
-        return {
-            'ss_error': ss_error,
-            'overshoot': overshoot,
-            'vibration': vibration,
-        }
+    def _wait_vel_zero(self, timeout=4.0):
+        """รอจน encoder velocity ≈ 0 (motor หยุดจริง)"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._stop_event.wait(0.05):
+                return
+            try:
+                if abs(self.mw.h_vel[-1]) < 0.15:
+                    return
+            except (IndexError, TypeError):
+                pass
 
+    def _estop(self):
+        """Emergency stop: flush queue → STOP firmware → รอ motor หยุดจริง"""
+        s = self.mw.serial
+        if s and s._running:
+            # ล้างคำสั่งที่รออยู่ทั้งหมด
+            while not s._q.empty():
+                try:
+                    s._q.get_nowait()
+                except Exception:
+                    break
+            # ส่ง STOP ตรงๆ โดยไม่ผ่านคิว
+            try:
+                import struct as _s
+                pkt = _s.pack('>BBHH', SLAVE_ID, 6, R_STOP, 1)
+                crc = _crc16(pkt)
+                s._ser.write(pkt + crc)
+            except Exception:
+                s._q.put((R_STOP, 1))
+        self._wait_vel_zero(timeout=4.0)
+        self._sleep(0.3)
+
+    def _apply(self, d, target_rad):
+        self._send(R_KP_VEL, int(d['kp_vel'] * 100))
+        self._send(R_KI_VEL, int(d.get('ki_vel', 0.0) * 100))
+        self._send(R_KD_VEL, int(d.get('kd_vel', 0.0) * 100))
+        self._send(R_KP_POS, int(d.get('kp_pos', 1.0) * 100))
+        self._send(R_KD_POS, int(d.get('kd_pos', 0.0) * 100))
+        self._send(R_KI_POS, int(d.get('ki_pos', 0.0) * 100))
+        self._send(R_TRAJ,   1)
+        self._send(R_VMAX,   int(d['v_max'] * 100))
+        self._send(R_AMAX,   int(d['a_max'] * 100))
+        self._send(R_JMAX,   int(d['j_max'] * 100))
+        self._send(R_TARGET, int(target_rad * 1000) & 0xFFFF)
+        self._send(R_APPLY,  1)
+
+    def _go_home(self, d, from_rad):
+        """กลับ start position ช้าๆ ปลอดภัย"""
+        safe = {**d, 'kp_vel': min(d['kp_vel'], 8.0),
+                'ki_vel': 0.0, 'kd_pos': max(d.get('kd_pos', 0.0), 0.2)}
+        self._apply(safe, from_rad)
+        self._wait_settle(from_rad * R2D, max_wait=4.0)
+
+    def _wait_settle(self, target_deg, max_wait=5.0):
+        """รอจนหยุดนิ่ง (อ่าน encoder จริง) หรือ timeout"""
+        deadline  = time.time() + max_wait
+        ok_since  = None
+        while time.time() < deadline:
+            if self._stop_event.wait(0.08):
+                return
+            try:
+                pos_now = self.mw.h_pos[-1]   # degrees
+                vel_now = abs(self.mw.h_vel[-1])
+                near = abs(pos_now - target_deg) < 4.0
+                slow = vel_now < 0.25
+                if near and slow:
+                    if ok_since is None:
+                        ok_since = time.time()
+                    elif time.time() - ok_since > 0.4:
+                        return
+                else:
+                    ok_since = None
+            except (IndexError, TypeError):
+                pass
+
+    def _measure(self, d, target_rad, max_wait=6.0):
+        """สั่งหมุน รอนิ่ง แล้วเก็บข้อมูล 1 วิ"""
+        self.mw.tune_buf    = {'t': [], 'pos': [], 'vel': [], 'acc': []}
+        self.mw.tune_active = True
+        self.mw.tune_t0     = time.time()
+        self._apply(d, target_rad)
+        self._wait_settle(target_rad * R2D, max_wait=max_wait)
+        self._sleep(0.8)   # เก็บ tail data
+        self.mw.tune_active = False
+        self._sleep(0.05)
+        return dict(self.mw.tune_buf)
+
+    def _is_oscillating(self, data):
+        """ตรวจ oscillation จาก velocity tail (encoder จริง)"""
+        vel = np.array(data['vel'])
+        acc = np.array(data['acc'])
+        if len(vel) < 20:
+            return False
+        n        = max(15, len(vel) // 3)
+        tail_v   = vel[-n:]
+        tail_a   = acc[-n:]
+        rms_vel  = float(np.sqrt(np.mean(tail_v ** 2)))
+        std_acc  = float(np.std(tail_a))
+        signs    = np.sign(tail_v)
+        crossings = int(np.sum(np.diff(signs) != 0))
+        # oscillating = velocity ยังสูง หรือ sign เปลี่ยนบ่อย หรือ accel สั่น
+        return rms_vel > 0.8 or crossings >= 7 or std_acc > 20.0
+
+    def _score(self, data, target_rad):
+        pos = np.array(data['pos'])
+        acc = np.array(data['acc'])
+        vel = np.array(data['vel'])
+        if len(pos) < 15:
+            return None, {}
+        target_deg = target_rad * R2D
+        ss_err  = abs(target_deg - float(np.mean(pos[-15:])))
+        if target_deg >= pos[0]:
+            os_ = max(float(np.max(pos)) - target_deg, 0.0)
+        else:
+            os_ = max(target_deg - float(np.min(pos)), 0.0)
+        vib   = float(np.std(acc[-15:]))
+        score = os_ * 80 + ss_err * 30 + vib * 5   # หน่วยองศา
+        return score, {'ss_err': ss_err, 'os': os_, 'vib': vib}
+
+    # ── Main Algorithm ─────────────────────────────────────────────────────────
     def run(self):
-        if not self.mw.serial_thread or not self.mw.serial_thread.is_running:
-            self.log_signal.emit("❌ Port not connected.")
-            self.finished_signal.emit()
+        mw = self.mw
+        if not mw.serial or not mw.serial._running:
+            self.log.emit("Not connected.")
+            self.done.emit()
             return
-            
+
         try:
-            self.log_signal.emit("\n" + "="*50)
-            self.log_signal.emit(f"🏆 MASTERPIECE TUNER INITIATED (Precision Stop)")
-            self.log_signal.emit("="*50 + "\n")
+            v_max    = float(mw.e_vmax.text())
+            a_max    = float(mw.e_amax.text())
+            j_max    = float(mw.e_jmax.text())
+            from_deg = float(mw.e_tune_from.text())
+            to_deg   = float(mw.e_tune_to.text())
+        except Exception:
+            v_max, a_max, j_max = DEF['v_max'], DEF['a_max'], DEF['j_max']
+            from_deg, to_deg = 0.0, 90.0
 
-            # --- 1. HOMING ---
-            self.log_signal.emit("🤖 [1/6] Safe Homing...")
-            self.set_parameters(5.0, 0.0, 0.0, 0.0) 
-            time.sleep(2.0)
-            
-            # --- 2. MATH ESTIMATION (FAST SYSTEM ID) ---
-            self.log_signal.emit("\n🤖 [2/6] Physics Modeling (Math Estimation)...")
-            test_pwm = 20.0 
-            
-            self.mw.tune_time_data, self.mw.tune_pos_data, self.mw.tune_vel_data = [], [], []
-            self.mw.is_tuning = True
-            
-            self.write_reg(REG_STEP_CMD, int(test_pwm * 100))
-            time.sleep(0.8) 
-            self.write_reg(REG_STEP_CMD, 0)
-            self.mw.is_tuning = False
-            time.sleep(0.5)
+        from_rad = from_deg * math.pi / 180.0
+        to_rad   = to_deg   * math.pi / 180.0
 
-            t = np.array(self.mw.tune_time_data)
-            y = np.array(self.mw.tune_vel_data)
-            if len(t) < 10: raise Exception("No Telemetry!")
-            y = y - y[0] 
-            t = t - t[0]
-            
-            def step_response(t, K_sys, tau):
-                return K_sys * (test_pwm / 100.0) * (1 - np.exp(-t / max(tau, 0.001)))
-            
-            popt, _ = curve_fit(step_response, t, y, bounds=(0, np.inf))
-            K_sys, tau = popt
-            
-            if tau > 10.0 or K_sys < 0.005: 
-                raise Exception("Motor failed to move correctly. Check Power.")
-            
-            Tc_base = tau
-            Kp_base = (tau / (K_sys * Tc_base)) * 100.0
-            Ki_base = Kp_base / min(tau, 4 * Tc_base)
-            Kp_base = min(max(Kp_base, 5.0), 60.0)
-            
-            self.log_signal.emit(f"   ↳ Base Kp calculated: {Kp_base:.2f}")
-            self.log_signal.emit(f"   ↳ Base Ki calculated: {Ki_base:.2f}")
+        traj = dict(v_max=v_max, a_max=a_max, j_max=j_max)
 
-            # --- 3. P-GAIN SWEEP (SPEED) ---
-            self.log_signal.emit("\n🤖 [3/6] P-Gain Sweep (Responsiveness)...")
-            kp_multipliers = [0.8, 1.0, 1.2]
-            best_kp_score = float('inf')
-            best_kp = Kp_base
-            
-            for mult in kp_multipliers:
-                if not self.is_running: break
-                test_kp = Kp_base * mult
-                self.log_signal.emit(f"   Testing Kp = {test_kp:.1f} ({mult}x)")
-                
-                self.mw.tune_time_data, self.mw.tune_pos_data, self.mw.tune_vel_data, self.mw.tune_acc_data = [], [], [], []
-                self.mw.is_tuning = True
-                self.set_parameters(test_kp, 0.0, 0.0, 1.57)
-                res = self.measure_performance(1.57)
-                
-                self.set_parameters(test_kp, 0.0, 0.0, 0.0) # Return home
-                time.sleep(2.0)
-                
-                if not res: continue
-                
-                # เน้นที่ Error และลดการสั่น
-                score = (res['ss_error'] * 500) + (res['vibration'] * 100)
-                if score < best_kp_score:
-                    best_kp_score = score
-                    best_kp = test_kp
-            
-            self.log_signal.emit(f"   ✅ Locked Optimal P-Gain: {best_kp:.2f}")
+        self.log.emit("=" * 58)
+        self.log.emit("  SAFE INCREMENTAL TUNER")
+        self.log.emit(f"  {from_deg:.0f}° → {to_deg:.0f}°  |  S-Curve")
+        self.log.emit(f"  เริ่มนิ่มมาก → เพิ่มทีละขั้น → หยุดก่อนสั่น")
+        self.log.emit(f"  อ่าน encoder ตลอด: ถ้าสั่นหยุดทันที (STOP)")
+        self.log.emit("=" * 58)
 
-            # --- 4. I-GAIN SWEEP (ERROR ELIMINATION) ---
-            self.log_signal.emit("\n🤖 [4/6] I-Gain Sweep (Precision Targeting)...")
-            ki_multipliers = [0.5, 1.0, 1.5]
-            best_ki_score = float('inf')
-            best_ki = Ki_base * 0.5
-            
-            for mult in ki_multipliers:
-                if not self.is_running: break
-                test_ki = Ki_base * mult
-                self.log_signal.emit(f"   Testing Ki = {test_ki:.2f} ({mult}x)")
-                
-                self.mw.tune_time_data, self.mw.tune_pos_data, self.mw.tune_vel_data, self.mw.tune_acc_data = [], [], [], []
-                self.mw.is_tuning = True
-                self.set_parameters(best_kp, test_ki, 0.0, 1.57)
-                res = self.measure_performance(1.57)
-                
-                self.set_parameters(best_kp, test_ki, 0.0, 0.0)
-                time.sleep(2.0)
-                
-                if not res: continue
-                
-                # หักคะแนนหนักมากถ้า Overshoot > 0.015
-                if res['overshoot'] > 0.015:
-                    self.log_signal.emit("      ⚠️ REJECTED: Caused Overshoot.")
-                    continue
-                    
-                score = res['ss_error']
-                if score < best_ki_score:
-                    best_ki_score = score
-                    best_ki = test_ki
+        # ── 0. Safe Home ──────────────────────────────────────────────────────
+        self.log.emit(f"\n[0] Home → {from_deg:.0f}°  (ช้า Kp=5)")
+        start_cfg = dict(**traj, kp_vel=5.0, kp_pos=0.5, kd_pos=0.2)
+        self._apply(start_cfg, from_rad)
+        self._wait_settle(from_deg, max_wait=5.0)
 
-            self.log_signal.emit(f"   ✅ Locked Optimal I-Gain: {best_ki:.2f}")
+        if not self._alive:
+            self.done.emit(); return
 
-            # --- 5. D-GAIN SWEEP (THE PERFECT STOP) ---
-            self.log_signal.emit("\n🤖 [5/6] D-Gain Sweep (Shock Absorber for Perfect Stop)...")
-            # กวาดหา D เพื่อเบรกให้นิ่งที่สุด
-            kd_tests = [0.0, 0.1, 0.3, 0.5]
-            best_kd_score = float('inf')
-            best_kd = 0.0
-            
-            for test_kd in kd_tests:
-                if not self.is_running: break
-                self.log_signal.emit(f"   Testing Kd = {test_kd:.2f}")
-                
-                self.mw.tune_time_data, self.mw.tune_pos_data, self.mw.tune_vel_data, self.mw.tune_acc_data = [], [], [], []
-                self.mw.is_tuning = True
-                self.set_parameters(best_kp, best_ki, test_kd, 1.57)
-                res = self.measure_performance(1.57)
-                
-                self.set_parameters(best_kp, best_ki, test_kd, 0.0)
-                time.sleep(2.0)
-                
-                if not res: continue
-                
-                # โฟกัสไปที่ Vibration ตอนจบเพียวๆ
-                score = res['vibration'] + (res['overshoot'] * 100)
-                self.log_signal.emit(f"      Vibration Score: {res['vibration']:.2f}")
-                
-                if score < best_kd_score:
-                    best_kd_score = score
-                    best_kd = test_kd
+        # ── 1. Kp_vel search — geometric +40% each step ───────────────────────
+        self.log.emit(f"\n[1/3] Kp_vel search  (Kp_pos=0.5, Kd_pos=0)")
+        self.log.emit( "      เริ่ม 3 → ×1.4 ทีละขั้น → หยุดเมื่อสั่น")
 
-            self.log_signal.emit(f"   ✅ Locked Optimal D-Gain: {best_kd:.2f}")
+        kp       = 3.0
+        best_kp  = 3.0
+        prev_vib = 999.0
 
-            # --- 6. FINALIZE ---
-            self.log_signal.emit("\n" + "="*50)
-            self.log_signal.emit(f"🏆 MASTERPIECE TUNING COMPLETE")
-            self.log_signal.emit(f"   Final Kp = {best_kp:.3f} (Speed)")
-            self.log_signal.emit(f"   Final Ki = {best_ki:.3f} (Precision)")
-            self.log_signal.emit(f"   Final Kd = {best_kd:.3f} (Perfect Stop)")
-            self.log_signal.emit("="*50 + "\n")
-            
-            self.gains_signal.emit(best_kp, best_ki, best_kd)
-            self.set_parameters(best_kp, best_ki, best_kd, 0.0)
-            
-        except Exception as e:
-            self.log_signal.emit(f"❌ Tuner Crash: {e}")
-            
-        self.finished_signal.emit()
+        while kp <= 80 and self._alive:
+            cfg = dict(**traj, kp_vel=kp, kp_pos=0.5, kd_pos=0.0)
+            self._go_home(cfg, from_rad)
+            if not self._alive: break
+            data = self._measure(cfg, to_rad)
+            if not self._alive: break
+
+            osc = self._is_oscillating(data)
+            sc, inf = self._score(data, to_rad)
+
+            if osc or sc is None:
+                self.log.emit(f"   Kp={kp:5.1f}  ⚠ OSCILLATION → ESTOP + รอหยุด")
+                self._estop()   # flush queue + รอ velocity=0
+                break
+
+            trend = "↑ vib เพิ่ม" if inf['vib'] > prev_vib * 1.8 else "✓ ok"
+            self.log.emit(
+                f"   Kp={kp:5.1f}  os={inf['os']:.1f}°  "
+                f"err={inf['ss_err']:.1f}°  vib={inf['vib']:.1f}  {trend}")
+
+            best_kp  = kp
+            prev_vib = inf['vib']
+            kp      *= 1.4
+
+        safe_kp = best_kp * 0.75
+        self.log.emit(f"   limit≈{best_kp:.1f} → safe={safe_kp:.1f} (75%)")
+
+        if not self._alive:
+            self._estop(); self.done.emit(); return
+
+        # ── 2. Kd_pos sweep — pendulum damping ────────────────────────────────
+        self.log.emit(f"\n[2/3] Kd_pos sweep  (Kp_vel={safe_kp:.1f}, Kp_pos=1.0)")
+        self.log.emit( "      motor นิ่งสนิทแล้ว — เริ่มหา Kd_pos")
+
+        kd_steps  = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+        best_kd, best_kd_sc = 0.0, float('inf')
+
+        for kd in kd_steps:
+            if not self._alive: break
+            cfg = dict(**traj, kp_vel=safe_kp, kp_pos=1.0, kd_pos=kd)
+            self._go_home(cfg, from_rad)
+            if not self._alive: break
+            data = self._measure(cfg, to_rad)
+
+            if self._is_oscillating(data):
+                self.log.emit(f"   Kd_pos={kd:.2f}  ⚠ OSCILLATION → ESTOP")
+                self._estop()
+                break
+
+            sc, inf = self._score(data, to_rad)
+            if sc is None: continue
+            tag = " ←" if sc < best_kd_sc else ""
+            self.log.emit(
+                f"   Kd_pos={kd:.2f}  os={inf['os']:.1f}°  "
+                f"vib={inf['vib']:.1f}  err={inf['ss_err']:.1f}°{tag}")
+            if sc < best_kd_sc:
+                best_kd_sc, best_kd = sc, kd
+
+        self.log.emit(f"   ✅ Best Kd_pos = {best_kd:.2f}")
+
+        if not self._alive:
+            self._estop(); self.done.emit(); return
+
+        # ── 3. Ki_vel sweep — drift only ──────────────────────────────────────
+        self.log.emit(f"\n[3/3] Ki_vel sweep  (เล็กมาก — drift เท่านั้น)")
+
+        ki_steps = [0.0, 0.02, 0.05, 0.08, 0.12]
+        best_ki, best_ki_sc = 0.0, float('inf')
+
+        for ki in ki_steps:
+            if not self._alive: break
+            cfg = dict(**traj, kp_vel=safe_kp, ki_vel=ki,
+                       kp_pos=1.0, kd_pos=best_kd)
+            self._go_home(cfg, from_rad)
+            if not self._alive: break
+            data = self._measure(cfg, to_rad)
+
+            if self._is_oscillating(data):
+                self.log.emit(f"   Ki={ki:.3f}  ⚠ OSCILLATION → ESTOP")
+                self._estop()
+                break
+
+            sc, inf = self._score(data, to_rad)
+            if sc is None: continue
+            if inf['os'] > 5.0:
+                self.log.emit(f"   Ki={ki:.3f}  REJECTED (os={inf['os']:.1f}°)")
+                continue
+
+            tag = " ←" if sc < best_ki_sc else ""
+            self.log.emit(
+                f"   Ki={ki:.3f}  err={inf['ss_err']:.1f}°  os={inf['os']:.1f}°{tag}")
+            if sc < best_ki_sc:
+                best_ki_sc, best_ki = sc, ki
+
+        self.log.emit(f"   ✅ Best Ki_vel = {best_ki:.3f}")
+
+        # ── Final ──────────────────────────────────────────────────────────────
+        result = dict(
+            kp_vel=safe_kp, ki_vel=best_ki, kd_vel=0.0,
+            kp_pos=1.0,     ki_pos=0.0,     kd_pos=best_kd,
+            v_max=v_max, a_max=a_max, j_max=j_max,
+        )
+        self.log.emit("\n" + "=" * 58)
+        self.log.emit("  TUNING COMPLETE")
+        self.log.emit(f"  Kp_vel={safe_kp:.2f}  Ki_vel={best_ki:.3f}  Kd_vel=0")
+        self.log.emit(f"  Kp_pos=1.0   Ki_pos=0   Kd_pos={best_kd:.2f}")
+        self.log.emit(f"  v={v_max}  a={a_max}  j={j_max}")
+        self.log.emit("=" * 58)
+
+        # Apply final and go home
+        self._apply(result, from_rad)
+        self.result.emit(result)
+        self.done.emit()
 
     def stop(self):
-        self.is_running = False
+        self._alive = False
+        self._stop_event.set()
 
-# ==========================================
-# MAIN GUI APPLICATION
-# ==========================================
+
+# ── Main Window ────────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("STM32 Masterpiece Tuner (Speed + Precision Stop)")
-        self.resize(1300, 850)
+        self.setWindowTitle("STM32 S-Curve Tuner  —  1-DOF Pendulum")
+        self.resize(1500, 960)
 
-        self.serial_thread = None
-        self.tuner_thread = None
-        self.is_tuning = False
-        self.tune_time_data = []
-        self.tune_pos_data = []
-        self.tune_vel_data = []
-        self.tune_acc_data = []
+        self.serial = None
+        self.tuner  = None
 
-        self.setup_ui()
+        # ── Time-series history (degrees / rad/s / rad/s²) ────────────────────
+        self.t_start  = None
+        self.h_t      = deque(maxlen=MAX_HIST)
+        self.h_pos    = deque(maxlen=MAX_HIST)   # actual position (°)
+        self.h_pref   = deque(maxlen=MAX_HIST)   # reference position (°)
+        self.h_vel    = deque(maxlen=MAX_HIST)   # actual velocity (rad/s)
+        self.h_vref   = deque(maxlen=MAX_HIST)   # reference velocity (rad/s)
+        self.h_acc    = deque(maxlen=MAX_HIST)   # acceleration (rad/s²)
 
-    def setup_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
+        # Tuner capture
+        self.tune_active = False
+        self.tune_t0     = 0.0
+        self.tune_buf    = {'t': [], 'pos': [], 'vel': [], 'acc': []}
 
-        left_panel = QVBoxLayout()
-        main_layout.addLayout(left_panel, stretch=3)
+        self._build_ui()
 
-        conn_group = QGroupBox("Single-Cable Connection")
-        conn_layout = QFormLayout()
-        self.port_input = QLineEdit("COM14")
-        self.btn_connect = QPushButton("Connect System")
-        self.btn_connect.clicked.connect(self.toggle_connection)
-        conn_layout.addRow("COM Port (ST-Link):", self.port_input)
-        conn_layout.addRow(self.btn_connect)
-        conn_group.setLayout(conn_layout)
-        left_panel.addWidget(conn_group)
+        # Graph refresh @ 25 Hz (decoupled from 50 Hz telemetry)
+        self._gtimer = QTimer(self)
+        self._gtimer.timeout.connect(self._refresh_graphs)
+        self._gtimer.start(40)
 
-        ctrl_group = QGroupBox("Trajectory Limits & Control")
-        ctrl_layout = QFormLayout()
-        self.target_pos_input = QLineEdit("0.0")
-        
-        # UI สำหรับความเร็วสูงสุด
-        self.vmax_input = QLineEdit("6.28") 
-        self.amax_input = QLineEdit("6.28")
-        self.jmax_input = QLineEdit("12.56")
+    # ── UI ─────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = QWidget()
+        self.setCentralWidget(root)
+        main = QHBoxLayout(root)
+        main.setSpacing(8)
 
-        self.kp_input = QLineEdit("20.0")
-        self.ki_input = QLineEdit("0.0")
-        self.kd_input = QLineEdit("0.0")
-        self.btn_send_ctrl = QPushButton("Apply to STM32")
-        self.btn_send_ctrl.setStyleSheet("font-weight: bold; background-color: #ffc107; color: black; padding: 10px;")
-        self.btn_send_ctrl.clicked.connect(self.send_control_settings)
-        
-        ctrl_layout.addRow("Target Pos (rad):", self.target_pos_input)
-        ctrl_layout.addRow("V Max (rad/s):", self.vmax_input)
-        ctrl_layout.addRow("A Max (rad/s²):", self.amax_input)
-        ctrl_layout.addRow("Jerk Max (rad/s³):", self.jmax_input)
-        ctrl_layout.addRow("Kp Vel:", self.kp_input)
-        ctrl_layout.addRow("Ki Vel:", self.ki_input)
-        ctrl_layout.addRow("Kd Vel (Damper):", self.kd_input)
-        ctrl_layout.addRow(self.btn_send_ctrl)
-        ctrl_group.setLayout(ctrl_layout)
-        left_panel.addWidget(ctrl_group)
+        # ── Left panel ─────────────────────────────────────────────────────────
+        left = QWidget()
+        left.setFixedWidth(340)
+        lv = QVBoxLayout(left)
+        lv.setSpacing(6)
+        main.addWidget(left)
 
-        tune_group = QGroupBox("Masterpiece Auto-Tuner (Fast & Exact Stop)")
-        tune_layout = QVBoxLayout()
-        btn_layout = QHBoxLayout()
-        
-        self.btn_tune = QPushButton("▶ RUN MASTERPIECE TUNE")
-        self.btn_tune.setStyleSheet("font-weight: bold; padding: 12px; background-color: #8b0000; color: white; font-size: 14px;")
-        self.btn_tune.clicked.connect(self.start_autotune)
-        
-        self.btn_save_log = QPushButton("💾 Save Log")
-        self.btn_save_log.setStyleSheet("padding: 12px;")
-        self.btn_save_log.clicked.connect(self.save_log)
-        
-        btn_layout.addWidget(self.btn_tune)
-        btn_layout.addWidget(self.btn_save_log)
-        
-        self.lbl_tune_res = QLabel("Ready.\nThis algorithm uses your original fast math,\nthen adds a strict D-Gain (Kd) sweep to ensure\nit stops DEAD precisely on target.")
-        self.lbl_tune_res.setWordWrap(True)
-        self.lbl_tune_res.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.lbl_tune_res.setStyleSheet("background-color: #0c0c0c; color: #00ff00; padding: 10px; font-family: Consolas; font-size: 12px;")
-        
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(self.lbl_tune_res)
-        scroll_area.setMinimumHeight(300)
+        # Connection
+        cg = QGroupBox("Connection")
+        cf = QFormLayout()
+        self.e_port  = QLineEdit("COM14")
+        self.cb_baud = QComboBox()
+        for label in BAUD_CONFIGS:
+            self.cb_baud.addItem(label)
+        self.cb_baud.setCurrentIndex(0)
+        self.lbl_pkts = QLabel("pkts: 0")
+        self.lbl_pkts.setStyleSheet("color:#00cc66;font-family:Consolas;font-size:10px;")
+        self.btn_conn = QPushButton("Connect")
+        self.btn_conn.setStyleSheet(
+            "background:#1e6b1e;color:white;font-weight:bold;padding:7px;border-radius:4px;")
+        self.btn_conn.clicked.connect(self._toggle_conn)
+        cf.addRow("COM Port:", self.e_port)
+        cf.addRow("Baud:", self.cb_baud)
+        cf.addRow(self.lbl_pkts, self.btn_conn)
+        cg.setLayout(cf)
+        lv.addWidget(cg)
 
-        tune_layout.addLayout(btn_layout)
-        tune_layout.addWidget(scroll_area)
-        tune_group.setLayout(tune_layout)
-        left_panel.addWidget(tune_group)
+        # STOP button — always visible
+        self.btn_stop = QPushButton("⏹  STOP")
+        self.btn_stop.setStyleSheet(
+            "background:#cc0000;color:white;font-weight:bold;"
+            "padding:12px;font-size:16px;border-radius:6px;")
+        self.btn_stop.clicked.connect(self._stop)
+        lv.addWidget(self.btn_stop)
 
-        self.plot_widget = pg.GraphicsLayoutWidget()
-        main_layout.addWidget(self.plot_widget, stretch=4)
-        
-        self.p1 = self.plot_widget.addPlot(title="Position (rad)")
-        self.curve_pos = self.p1.plot(pen=pg.mkPen('y', width=2))
-        self.plot_widget.nextRow()
-        self.p2 = self.plot_widget.addPlot(title="Velocity (rad/s)")
-        self.curve_vel = self.p2.plot(pen=pg.mkPen('c', width=2))
-        self.plot_widget.nextRow()
-        self.p3 = self.plot_widget.addPlot(title="Acceleration (rad/s²) [Vibration Detection]")
-        self.curve_acc = self.p3.plot(pen=pg.mkPen('m', width=2))
+        # Tabs
+        tabs = QTabWidget()
+        lv.addWidget(tabs, stretch=1)
 
-        self.plot_data_size = 500
-        self.pos_data = np.zeros(self.plot_data_size)
-        self.vel_data = np.zeros(self.plot_data_size)
-        self.acc_data = np.zeros(self.plot_data_size)
+        # ── Tab 1: Manual ──────────────────────────────────────────────────────
+        mt = QWidget()
+        mv = QVBoxLayout(mt)
+        mv.setSpacing(4)
 
-    def toggle_connection(self):
-        if self.btn_connect.text() == "Connect System":
-            self.serial_thread = SerialThread(self.port_input.text(), baudrate=115200)
-            self.serial_thread.data_received.connect(self.update_telemetry)
-            self.serial_thread.error_signal.connect(lambda e: QMessageBox.critical(self, "Serial Error", e))
-            self.serial_thread.start()
-            self.btn_connect.setText("Disconnect")
+        tg = QGroupBox("S-Curve Trajectory")
+        tf = QFormLayout()
+        self.e_vmax = QLineEdit(str(DEF['v_max']))
+        self.e_amax = QLineEdit(str(DEF['a_max']))
+        self.e_jmax = QLineEdit(str(DEF['j_max']))
+        tf.addRow("v_max (rad/s):",  self.e_vmax)
+        tf.addRow("a_max (rad/s²):", self.e_amax)
+        tf.addRow("j_max (rad/s³):", self.e_jmax)
+        tg.setLayout(tf)
+        mv.addWidget(tg)
+
+        vg = QGroupBox("Velocity PID  (inner loop)")
+        vf = QFormLayout()
+        self.e_kp_vel = QLineEdit(str(DEF['kp_vel']))
+        self.e_ki_vel = QLineEdit(str(DEF['ki_vel']))
+        self.e_kd_vel = QLineEdit(str(DEF['kd_vel']))
+        vf.addRow("Kp_vel:", self.e_kp_vel)
+        vf.addRow("Ki_vel:", self.e_ki_vel)
+        vf.addRow("Kd_vel:", self.e_kd_vel)
+        self._note(vf, "Kd_vel = 0 recommended (1kHz noise)")
+        vg.setLayout(vf)
+        mv.addWidget(vg)
+
+        pg_ = QGroupBox("Position PID  (outer loop)")
+        pf  = QFormLayout()
+        self.e_kp_pos = QLineEdit(str(DEF['kp_pos']))
+        self.e_ki_pos = QLineEdit(str(DEF['ki_pos']))
+        self.e_kd_pos = QLineEdit(str(DEF['kd_pos']))
+        pf.addRow("Kp_pos:", self.e_kp_pos)
+        pf.addRow("Ki_pos:", self.e_ki_pos)
+        pf.addRow("Kd_pos (damp):", self.e_kd_pos)
+        self._note(pf, "Kd_pos uses −velocity → pendulum damping")
+        pg_.setLayout(pf)
+        mv.addWidget(pg_)
+
+        mg = QGroupBox("Move Command")
+        mf = QFormLayout()
+        self.e_target = QLineEdit(str(DEF['target_deg']))
+        mf.addRow("Target (°):", self.e_target)   # องศา
+        mg.setLayout(mf)
+        mv.addWidget(mg)
+
+        btn_apply = QPushButton("⚡  Apply & Move")
+        btn_apply.setStyleSheet(
+            "background:#9a5500;color:white;font-weight:bold;padding:10px;"
+            "font-size:13px;border-radius:4px;")
+        btn_apply.clicked.connect(self._manual_apply)
+
+        btn_home = QPushButton("🏠  Set Home  (current pos = 0°)")
+        btn_home.setStyleSheet(
+            "background:#1e2e7a;color:white;padding:7px;border-radius:4px;")
+        btn_home.clicked.connect(self._set_home)
+
+        mv.addWidget(btn_apply)
+        mv.addWidget(btn_home)
+        mv.addStretch()
+        tabs.addTab(mt, "Manual")
+
+        # ── Tab 2: Auto Tune ───────────────────────────────────────────────────
+        at = QWidget()
+        av = QVBoxLayout(at)
+        av.setSpacing(5)
+
+        rg = QGroupBox("Test Range")
+        rf = QFormLayout()
+        self.e_tune_from = QLineEdit("0")
+        self.e_tune_to   = QLineEdit("90")
+        rf.addRow("From (°):", self.e_tune_from)
+        rf.addRow("To   (°):", self.e_tune_to)
+        rg.setLayout(rf)
+        av.addWidget(rg)
+
+        self.btn_tune = QPushButton("▶  RUN SAFE INCREMENTAL TUNE")
+        self.btn_tune.setStyleSheet(
+            "background:#7a0000;color:white;font-weight:bold;padding:13px;"
+            "font-size:14px;border-radius:4px;")
+        self.btn_tune.clicked.connect(self._run_tune)
+        av.addWidget(self.btn_tune)
+
+        btn_save = QPushButton("💾  Save Log")
+        btn_save.clicked.connect(self._save_log)
+        av.addWidget(btn_save)
+
+        self.lbl_log = QLabel(
+            "Ready.\n\n"
+            "Algorithm (safe incremental):\n"
+            "  [1] Kp_vel: เริ่ม 3 → ×1.4 ทีละขั้น\n"
+            "       อ่าน encoder → หยุดก่อนสั่น\n"
+            "       ใช้ 75% เป็น safe zone\n\n"
+            "  [2] Kd_pos: 0→1.0 หา damping\n"
+            "       หยุดถ้าสั่น\n\n"
+            "  [3] Ki_vel: 0→0.12 drift เท่านั้น\n\n"
+            "ใช้เวลา ~5 min  กด ⏹ STOP ได้ตลอด"
+        )
+        self.lbl_log.setWordWrap(True)
+        self.lbl_log.setAlignment(Qt.AlignTop)
+        self.lbl_log.setStyleSheet(
+            "background:#080808;color:#00ff88;padding:8px;"
+            "font-family:Consolas;font-size:11px;")
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setWidget(self.lbl_log)
+        av.addWidget(sa, stretch=1)
+        tabs.addTab(at, "Auto Tune")
+
+        self.lbl_values = QLabel("Applied:  (not connected)")
+        self.lbl_values.setWordWrap(True)
+        self.lbl_values.setStyleSheet(
+            "background:#0e0e22;color:#aaaaff;padding:7px;"
+            "font-family:Consolas;font-size:10px;border-radius:4px;")
+        lv.addWidget(self.lbl_values)
+
+        # ── Right panel ────────────────────────────────────────────────────────
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setSpacing(4)
+        main.addWidget(right, stretch=1)
+
+        # Signal checkboxes + controls
+        ctrl = QWidget()
+        cl = QHBoxLayout(ctrl)
+        cl.setSpacing(12)
+
+        self.ck_pos_a = QCheckBox("Pos actual")
+        self.ck_pos_r = QCheckBox("Pos ref")
+        self.ck_vel_a = QCheckBox("Vel actual")
+        self.ck_vel_r = QCheckBox("Vel ref")
+        self.ck_acc   = QCheckBox("Accel")
+        self.ck_auto  = QCheckBox("Auto-scroll")
+
+        for ck, on in [(self.ck_pos_a, True), (self.ck_pos_r, True),
+                       (self.ck_vel_a, True), (self.ck_vel_r, True),
+                       (self.ck_acc,   False), (self.ck_auto,  True)]:
+            ck.setChecked(on)
+            ck.setStyleSheet("color:#cccccc;")
+            cl.addWidget(ck)
+
+        btn_clear = QPushButton("🗑 Clear")
+        btn_clear.setStyleSheet("padding:4px 10px;")
+        btn_clear.clicked.connect(self._clear_history)
+        cl.addStretch()
+        cl.addWidget(btn_clear)
+        rv.addWidget(ctrl)
+
+        # Graphs (pyqtgraph)
+        gw = pg.GraphicsLayoutWidget()
+        rv.addWidget(gw, stretch=1)
+
+        Y    = pg.mkPen('#ffcc00', width=2)
+        Ydsh = pg.mkPen('#888888', width=1.5, style=Qt.DashLine)
+        C    = pg.mkPen('#00ccff', width=2)
+        Cdsh = pg.mkPen('#5588bb', width=1.5, style=Qt.DashLine)
+        M    = pg.mkPen('#ff44cc', width=1.5)
+
+        self.p1 = gw.addPlot(
+            title="<b>Position</b>  "
+                  "<span style='color:#ffcc00'>─ actual (°)</span>  "
+                  "<span style='color:#888'>─ ─ reference (°)</span>")
+        self.p1.showGrid(x=True, y=True, alpha=0.25)
+        self.p1.setLabel('left', '°')
+        self.p1.setLabel('bottom', 's')
+        self.c_pos  = self.p1.plot(pen=Y,    name="pos actual")
+        self.c_pref = self.p1.plot(pen=Ydsh, name="pos ref")
+        gw.nextRow()
+
+        self.p2 = gw.addPlot(
+            title="<b>Velocity</b>  "
+                  "<span style='color:#00ccff'>─ actual (rad/s)</span>  "
+                  "<span style='color:#5588bb'>─ ─ reference (rad/s)</span>")
+        self.p2.showGrid(x=True, y=True, alpha=0.25)
+        self.p2.setLabel('left', 'rad/s')
+        self.p2.setLabel('bottom', 's')
+        self.p2.setXLink(self.p1)   # link X-axis → pan/zoom เคลื่อนพร้อมกัน
+        self.c_vel  = self.p2.plot(pen=C,    name="vel actual")
+        self.c_vref = self.p2.plot(pen=Cdsh, name="vel ref")
+        gw.nextRow()
+
+        self.p3 = gw.addPlot(title="<b>Acceleration</b>  rad/s²")
+        self.p3.showGrid(x=True, y=True, alpha=0.25)
+        self.p3.setLabel('left', 'rad/s²')
+        self.p3.setLabel('bottom', 's')
+        self.p3.setXLink(self.p1)   # link X-axis
+        self.c_acc = self.p3.plot(pen=M, name="accel")
+
+    def _note(self, layout, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
+        layout.addRow("", lbl)
+
+    # ── Slots ──────────────────────────────────────────────────────────────────
+    def _toggle_conn(self):
+        if self.serial is None or not self.serial._running:
+            baud, parity = BAUD_CONFIGS[self.cb_baud.currentText()]
+            self.serial = SerialThread(self.e_port.text(), baud=baud, parity=parity)
+            self.serial.telem.connect(self._on_telem)
+            self.serial.pkt_cnt.connect(lambda n: self.lbl_pkts.setText(f"pkts: {n}"))
+            self.serial.error.connect(
+                lambda e: QMessageBox.critical(self, "Serial Error", e))
+            self.serial.start()
+            self.btn_conn.setText("Disconnect")
+            self.btn_conn.setStyleSheet(
+                "background:#7a2020;color:white;font-weight:bold;padding:7px;border-radius:4px;")
+            self.lbl_pkts.setText("pkts: 0")
+            self.lbl_values.setText(f"Connected {self.cb_baud.currentText().split()[0]} — waiting…")
         else:
-            if self.serial_thread:
-                self.serial_thread.stop()
-                self.serial_thread.wait()
-                self.serial_thread = None
-            self.btn_connect.setText("Connect System")
+            self.serial.stop(); self.serial.wait(); self.serial = None
+            self.btn_conn.setText("Connect")
+            self.btn_conn.setStyleSheet(
+                "background:#1e6b1e;color:white;font-weight:bold;padding:7px;border-radius:4px;")
+            self.lbl_pkts.setText("pkts: 0")
+            self.lbl_values.setText("Applied:  (disconnected)")
 
-    def update_telemetry(self, pos, vel, acc):
-        self.pos_data = np.roll(self.pos_data, -1)
-        self.vel_data = np.roll(self.vel_data, -1)
-        self.acc_data = np.roll(self.acc_data, -1)
-        self.pos_data[-1] = pos
-        self.vel_data[-1] = vel
-        self.acc_data[-1] = acc
+    def _on_telem(self, pos, vel, acc, pos_ref, vel_ref):
+        now = time.time()
+        if self.t_start is None:
+            self.t_start = now
+        t = now - self.t_start
 
-        self.curve_pos.setData(self.pos_data)
-        self.curve_vel.setData(self.vel_data)
-        self.curve_acc.setData(self.acc_data)
+        # เก็บ history (position เป็นองศา)
+        self.h_t.append(t)
+        self.h_pos.append(pos  * R2D)
+        self.h_pref.append(pos_ref * R2D)
+        self.h_vel.append(vel)
+        self.h_vref.append(vel_ref)
+        self.h_acc.append(acc)
 
-        if self.is_tuning:
-            current_t = time.time() - self.tune_start_time
-            self.tune_time_data.append(current_t)
-            self.tune_pos_data.append(pos) 
-            self.tune_vel_data.append(vel)
-            self.tune_acc_data.append(acc)
+        # tuner capture
+        if self.tune_active:
+            self.tune_buf['t'].append(now - self.tune_t0)
+            self.tune_buf['pos'].append(pos)
+            self.tune_buf['vel'].append(vel)
+            self.tune_buf['acc'].append(acc)
 
-    def send_control_settings(self):
-        if not self.serial_thread or not self.serial_thread.is_running:
-            QMessageBox.warning(self, "Warning", "Port not connected.")
+    def _refresh_graphs(self):
+        """อัปเดต graph @ 25 Hz (แยกจาก telemetry 50 Hz)"""
+        if not self.h_t:
             return
+        t   = np.array(self.h_t)
+        pos = np.array(self.h_pos)
+        pre = np.array(self.h_pref)
+        vel = np.array(self.h_vel)
+        vre = np.array(self.h_vref)
+        acc = np.array(self.h_acc)
 
+        self.c_pos.setData(t, pos)  if self.ck_pos_a.isChecked() else self.c_pos.setData([], [])
+        self.c_pref.setData(t, pre) if self.ck_pos_r.isChecked() else self.c_pref.setData([], [])
+        self.c_vel.setData(t, vel)  if self.ck_vel_a.isChecked() else self.c_vel.setData([], [])
+        self.c_vref.setData(t, vre) if self.ck_vel_r.isChecked() else self.c_vref.setData([], [])
+        self.c_acc.setData(t, acc)  if self.ck_acc.isChecked()   else self.c_acc.setData([], [])
+
+        # Auto-scroll: แสดงข้อมูล 30 วินาทีล่าสุด
+        if self.ck_auto.isChecked() and len(t) > 0:
+            t_now = t[-1]
+            self.p1.setXRange(max(0, t_now - 30), t_now, padding=0.02)
+
+    def _clear_history(self):
+        for h in (self.h_t, self.h_pos, self.h_pref,
+                  self.h_vel, self.h_vref, self.h_acc):
+            h.clear()
+        self.t_start = None
+
+    def _manual_apply(self):
+        if not self.serial or not self.serial._running:
+            QMessageBox.warning(self, "Warning", "Not connected."); return
         try:
-            t_pos = float(self.target_pos_input.text())
-            kp = float(self.kp_input.text())
-            ki = float(self.ki_input.text())
-            kd = float(self.kd_input.text())
-
-            tuner = MasterpieceTunerThread(self)
-            tuner.set_parameters(kp, ki, kd, t_pos)
-            
+            d = {
+                'kp_vel':     float(self.e_kp_vel.text()),
+                'ki_vel':     float(self.e_ki_vel.text()),
+                'kd_vel':     float(self.e_kd_vel.text()),
+                'kp_pos':     float(self.e_kp_pos.text()),
+                'ki_pos':     float(self.e_ki_pos.text()),
+                'kd_pos':     float(self.e_kd_pos.text()),
+                'v_max':      float(self.e_vmax.text()),
+                'a_max':      float(self.e_amax.text()),
+                'j_max':      float(self.e_jmax.text()),
+                'target_deg': float(self.e_target.text()),  # องศา
+            }
         except ValueError:
-            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers.")
+            QMessageBox.warning(self, "Input Error", "Invalid number."); return
+        target_rad = d['target_deg'] * math.pi / 180.0   # แปลงเป็น rad สำหรับ Modbus
+        s = self.serial
+        s.send(R_KP_VEL, int(d['kp_vel'] * 100))
+        s.send(R_KI_VEL, int(d['ki_vel'] * 100))
+        s.send(R_KD_VEL, int(d['kd_vel'] * 100))
+        s.send(R_KP_POS, int(d['kp_pos'] * 100))
+        s.send(R_KI_POS, int(d['ki_pos'] * 100))
+        s.send(R_KD_POS, int(d['kd_pos'] * 100))
+        s.send(R_TRAJ,   1)
+        s.send(R_VMAX,   int(d['v_max']  * 100))
+        s.send(R_AMAX,   int(d['a_max']  * 100))
+        s.send(R_JMAX,   int(d['j_max']  * 100))
+        s.send(R_TARGET, int(target_rad  * 1000) & 0xFFFF)
+        s.send(R_APPLY,  1)
+        self._show_values(d)
 
-    def start_autotune(self):
-        if not self.serial_thread or not self.serial_thread.is_running:
-            QMessageBox.warning(self, "Warning", "Connect to the System first.")
-            return
+    def _stop(self):
+        # หยุด tuner thread ถ้ากำลัง tune อยู่
+        if self.tuner and self.tuner.isRunning():
+            self.tuner.stop()
+            self.lbl_log.setText(self.lbl_log.text() + "\n⏹ STOPPED by user\n")
+            self.btn_tune.setEnabled(True)
+        self.tune_active = False
+        # ส่ง STOP ไป firmware
+        if self.serial and self.serial._running:
+            self.serial.send(R_STOP, 1)
 
+    def _set_home(self):
+        if not self.serial or not self.serial._running:
+            QMessageBox.warning(self, "Warning", "Not connected."); return
+        self.serial.send(R_STOP, 1)     # หยุดก่อนเสมอ
+        self.serial.send(R_SETHOME, 1)  # แล้วค่อย zero position
+
+    def _show_values(self, d):
+        tgt = d.get('target_deg', d.get('target', '?'))
+        self.lbl_values.setText(
+            f"Applied:  target={tgt}°\n"
+            f"  v={d.get('v_max','?')}  a={d.get('a_max','?')}  j={d.get('j_max','?')}\n"
+            f"  Kp_vel={d.get('kp_vel','?')}  Ki={d.get('ki_vel','?')}  Kd={d.get('kd_vel','?')}\n"
+            f"  Kp_pos={d.get('kp_pos','?')}  Ki={d.get('ki_pos','?')}  Kd={d.get('kd_pos','?')}"
+        )
+
+    def _run_tune(self):
+        if not self.serial or not self.serial._running:
+            QMessageBox.warning(self, "Warning", "Connect first."); return
         self.btn_tune.setEnabled(False)
-        self.lbl_tune_res.setText("Starting MASTERPIECE Tuner...\n")
-        
-        self.tune_start_time = time.time()
-        self.tune_time_data = []
-        
-        self.tuner_thread = MasterpieceTunerThread(self)
-        self.tuner_thread.log_signal.connect(self.update_tuner_log)
-        self.tuner_thread.gains_signal.connect(self.receive_tuned_gains)
-        self.tuner_thread.finished_signal.connect(lambda: self.btn_tune.setEnabled(True))
-        self.tuner_thread.start()
+        self.lbl_log.setText("Starting Pendulum Tuner…\n")
+        self.tuner = TunerThread(self)
+        self.tuner.log.connect(self._append_log)
+        self.tuner.result.connect(self._on_result)
+        self.tuner.done.connect(lambda: self.btn_tune.setEnabled(True))
+        self.tuner.start()
 
-    def update_tuner_log(self, text):
-        current_text = self.lbl_tune_res.text()
-        self.lbl_tune_res.setText(current_text + text + "\n")
-        scroll = self.lbl_tune_res.parent().parent().verticalScrollBar()
-        scroll.setValue(scroll.maximum())
+    def _append_log(self, text):
+        self.lbl_log.setText(self.lbl_log.text() + text + "\n")
 
-    def receive_tuned_gains(self, kp, ki, kd):
-        self.kp_input.setText(f"{kp:.3f}")
-        self.ki_input.setText(f"{ki:.3f}")
-        self.kd_input.setText(f"{kd:.3f}")
+    def _on_result(self, d):
+        self.e_kp_vel.setText(f"{d['kp_vel']:.3f}")
+        self.e_ki_vel.setText(f"{d['ki_vel']:.3f}")
+        self.e_kd_vel.setText(f"{d.get('kd_vel', 0.0):.3f}")
+        self.e_kp_pos.setText(f"{d['kp_pos']:.3f}")
+        self.e_ki_pos.setText(f"{d.get('ki_pos', 0.0):.3f}")
+        self.e_kd_pos.setText(f"{d['kd_pos']:.3f}")
+        self.e_vmax.setText(f"{d['v_max']:.2f}")
+        self.e_amax.setText(f"{d['a_max']:.2f}")
+        self.e_jmax.setText(f"{d['j_max']:.2f}")
+        d['target_deg'] = 0.0
+        self._show_values(d)
 
-    def save_log(self):
-        log_text = self.lbl_tune_res.text()
-        if not log_text or log_text.startswith("Ready"):
-            QMessageBox.information(self, "Info", "No log to save yet.")
-            return
-            
-        options = QFileDialog.Options()
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Tuning Log", "tuning_log.txt", "Text Files (*.txt);;All Files (*)", options=options)
-        if filename:
-            try:
-                with open(filename, 'w', encoding='utf-8') as f:
-                    f.write(log_text)
-                QMessageBox.information(self, "Success", f"Log saved to {filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not save file:\n{e}")
+    def _save_log(self):
+        text = self.lbl_log.text()
+        if "COMPLETE" not in text:
+            QMessageBox.information(self, "Info", "No completed log yet."); return
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Save Log", "pendulum_tune.txt", "Text (*.txt)")
+        if fn:
+            with open(fn, 'w', encoding='utf-8') as f:
+                f.write(text)
 
     def closeEvent(self, event):
-        if self.serial_thread:
-            self.serial_thread.stop()
-            self.serial_thread.wait()
+        if self.tuner and self.tuner.isRunning():
+            self.tuner.stop(); self.tuner.wait()
+        if self.serial:
+            self.serial.stop(); self.serial.wait()
         event.accept()
 
+
+# ── Entry ──────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+    app.setStyle('Fusion')
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec_())

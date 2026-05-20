@@ -1,4 +1,4 @@
-#include "SCURVE.h"
+#include "scurve.h"
 
 /* -----------------------------------------------------------------------
  * Internal helper: pre-compute all 7 segment boundary times for a move
@@ -6,65 +6,31 @@
  * ----------------------------------------------------------------------- */
 static void Compute_Profile(SCurve_t *sc, float d) {
     float j = sc->j_max;
-    float a = sc->a_max;
     float v = sc->v_max;
 
-    /* --- Determine peak acceleration and jerk-segment duration (t1) ---
+    /* --- Constant-jerk profile: t2 = 0 always ---
      *
-     * t1_full : time to reach a_max at rate j_max
-     * v_full  : minimum v_peak that uses the full a_max (segment 2 = 0)
-     *           v_full = j_max * t1^2  (velocity gained in 2 jerk segments)
+     * Jerk is ±j_max throughout; acceleration forms a triangle (not trapezoid).
+     *   t1    = sqrt(v_peak / j_max)  — duration of each jerk segment
+     *   a_peak = j_max × t1 = sqrt(j_max × v_peak)
+     *   d_acc  = v_peak × t1          — distance over both jerk segments
      */
-    float t1 = a / j;
-    float v_full = j * t1 * t1;   /* = a_max^2 / j_max */
+    float t1_used = sqrtf(v / j);
+    float v_peak  = v;
+    float a_peak  = j * t1_used;
 
-    float t1_used, t2, v_peak, a_peak;
+    float t_acc = 2.0f * t1_used;
+    float d_acc = v_peak * t_acc / 2.0f;   /* = v_peak * t1_used */
 
-    /* Choose whether the full a_max is reachable for the given v_max */
-    if (v <= v_full) {
-        /* v_max is reached before a_max — shorten t1, no segment 2 */
-        t1_used = sqrtf(v / j);
-        t2      = 0.0f;
-        v_peak  = v;
-        a_peak  = j * t1_used;
-    } else {
-        t1_used = t1;
-        t2      = (v - v_full) / a;
-        v_peak  = v;
-        a_peak  = a;
-    }
-
-    /* Distance consumed by the full acceleration phase (segs 1+2+3).
-     * For any symmetric jerk profile: d_acc = v_peak * t_acc / 2
-     * where t_acc = 2*t1 + t2.  (Proven analytically — area under the
-     * velocity ramp from 0 to v_peak.) */
-    float t_acc = 2.0f * t1_used + t2;
-    float d_acc = v_peak * t_acc / 2.0f;
-
-    /* --- Reduce v_peak if the displacement is too short for a cruise --- */
+    /* --- Reduce v_peak if the displacement is too short for a cruise ---
+     * With t2 = 0:  d = 2 × v_peak^(3/2) / sqrt(j_max)
+     *              v_peak = (d × sqrt(j_max) / 2) ^ (2/3)              */
     if (d < 2.0f * d_acc) {
-        /* Try keeping full a_max: solve  v^2/a + v*t1 = d
-         * (quadratic in v_peak):  v = (-t1 + sqrt(t1^2 + 4d/a)) * a/2  */
-        float disc       = t1 * t1 + 4.0f * d / a;
-        float v_candidate = (-t1 + sqrtf(disc)) * a / 2.0f;
-
-        if (v_candidate <= v_full) {
-            /* Even with t2=0 the distance is too short — reduce a_max too.
-             * With t2=0:  d = 2 * v^(3/2) / sqrt(j)
-             *             v_peak = (d * sqrt(j) / 2) ^ (2/3)            */
-            v_peak  = powf(d * sqrtf(j) / 2.0f, 2.0f / 3.0f);
-            t1_used = sqrtf(v_peak / j);
-            t2      = 0.0f;
-            a_peak  = j * t1_used;
-        } else {
-            v_peak  = v_candidate;
-            t1_used = t1;
-            t2      = (v_peak - v_full) / a;
-            a_peak  = a;
-        }
-
-        t_acc = 2.0f * t1_used + t2;
-        d_acc = v_peak * t_acc / 2.0f;
+        v_peak  = powf(d * sqrtf(j) / 2.0f, 2.0f / 3.0f);
+        t1_used = sqrtf(v_peak / j);
+        a_peak  = j * t1_used;
+        t_acc   = 2.0f * t1_used;
+        d_acc   = v_peak * t1_used;
     }
 
     sc->v_peak = v_peak;
@@ -74,15 +40,15 @@ static void Compute_Profile(SCurve_t *sc, float d) {
     float t_cruise = (d - 2.0f * d_acc) / v_peak;
     if (t_cruise < 0.0f) t_cruise = 0.0f;
 
-    /* Cumulative segment boundary times */
+    /* Cumulative segment boundary times (T[2]=T[1], T[6]=T[5] — segs 2&6 zero-length) */
     sc->T[0] = 0.0f;
-    sc->T[1] = t1_used;                      /* end seg 1: jerk up   */
-    sc->T[2] = sc->T[1] + t2;               /* end seg 2: const a   */
-    sc->T[3] = sc->T[2] + t1_used;          /* end seg 3: jerk down */
-    sc->T[4] = sc->T[3] + t_cruise;         /* end seg 4: cruise    */
-    sc->T[5] = sc->T[4] + t1_used;          /* end seg 5: jerk down */
-    sc->T[6] = sc->T[5] + t2;               /* end seg 6: const -a  */
-    sc->T[7] = sc->T[6] + t1_used;          /* end seg 7: jerk up   */
+    sc->T[1] = t1_used;                  /* end seg 1: +j_max */
+    sc->T[2] = t1_used;                  /* seg 2 skipped (t2=0) */
+    sc->T[3] = 2.0f * t1_used;          /* end seg 3: -j_max */
+    sc->T[4] = sc->T[3] + t_cruise;     /* end seg 4: cruise  */
+    sc->T[5] = sc->T[4] + t1_used;      /* end seg 5: -j_max */
+    sc->T[6] = sc->T[5];                 /* seg 6 skipped (t2=0) */
+    sc->T[7] = sc->T[6] + t1_used;      /* end seg 7: +j_max */
 }
 
 /* -----------------------------------------------------------------------
@@ -136,26 +102,27 @@ void SCurve_SetTarget_ByTime(SCurve_t *sc, float displacement,
     sc->p_current = 0.0f;
     sc->is_active = 1;
 
-    /* Back-compute profile from segment times.
+    /* Full 7-segment time-based profile with optional t2 constant-accel phase.
      *
-     * Area identity (proven in docs):  d = v_peak × (t_acc + t_cruise)
-     *   where t_acc = 2*t1 + t2
+     * Area identity:  d = v_peak × (2×t1 + t2 + t_cruise)
+     *   v_peak = d / (2×t1 + t2 + t_cruise)
+     *   a_peak = v_peak / (t1 + t2)
      *
-     * Then:  a_peak = v_peak / (t1 + t2)
-     *        j_used = a_peak / t1
+     * When t2 = 0 the profile degenerates to the pure constant-jerk triangle
+     * (same as before). Set t2 > 0 to get a flat-top acceleration plateau.
      */
     float t_acc  = 2.0f * t1 + t2;
     float v_peak = d / (t_acc + t_cruise);
-    float a_peak = (t1 + t2 > 1e-6f) ? v_peak / (t1 + t2) : v_peak / t1;
+    float a_peak = (t1 + t2 > 1e-6f) ? (v_peak / (t1 + t2)) : 0.0f;
 
     sc->v_peak = v_peak;
     sc->a_peak = a_peak;
 
-    /* Segment boundary times */
+    /* Segment boundary times (T[2]=T[1]+t2, T[6]=T[5]+t2; zero when t2=0) */
     sc->T[0] = 0.0f;
     sc->T[1] = t1;
     sc->T[2] = t1 + t2;
-    sc->T[3] = t1 + t2 + t1;
+    sc->T[3] = 2.0f * t1 + t2;
     sc->T[4] = sc->T[3] + t_cruise;
     sc->T[5] = sc->T[4] + t1;
     sc->T[6] = sc->T[5] + t2;
