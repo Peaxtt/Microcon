@@ -422,12 +422,12 @@
       <div class="sm-card">
         <div class="state">STATE_AUTO</div>
         <div class="desc">Cascade PID + Trajectory. <strong>P2P / direct move เท่านั้น</strong>. เข้า SEQUENCE ถ้า 0x22&gt;0.</div>
-        <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+        <div class="lights"><span class="dot dot-g"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
       </div>
       <div class="sm-card">
         <div class="state">STATE_SEQUENCE</div>
         <div class="desc">Multi-step pick/place sequence. Modbus 0x22 pair count + 0x04 gripper enable.</div>
-        <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+        <div class="lights"><span class="dot dot-g"></span><span class="dot dot-y"></span><span class="dot dot-off"></span></div>
       </div>
       <div class="sm-card">
         <div class="state">STATE_TEST</div>
@@ -486,16 +486,12 @@
         <div><div class="tower-label">MANUAL</div><div class="tower-sub">Green + Yellow steady — joystick manual mode</div></div>
       </div>
       <div class="tower-row">
-        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
-        <div><div class="tower-label">AUTO — P2P moving</div><div class="tower-sub">Green 4Hz blink — trajectory active</div></div>
-      </div>
-      <div class="tower-row">
         <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
-        <div><div class="tower-label">AUTO — P2P settled</div><div class="tower-sub">Green steady — ถึงตำแหน่งแล้ว</div></div>
+        <div><div class="tower-label">AUTO (P2P)</div><div class="tower-sub">Green steady — moving หรือ settled</div></div>
       </div>
       <div class="tower-row">
-        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
-        <div><div class="tower-label">SEQUENCE</div><div class="tower-sub">Green + Yellow blink 2Hz พร้อมกัน — pick/place sequence กำลังทำงาน</div></div>
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-y"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">SEQUENCE</div><div class="tower-sub">Green + Yellow steady — pick/place sequence กำลังทำงาน</div></div>
       </div>
       <div class="tower-row">
         <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>

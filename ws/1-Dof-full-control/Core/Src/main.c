@@ -28,6 +28,9 @@
 #include "SCURVE.h"
 #include "TRAPEZOID.h"
 #include "ENCODER.h"
+#include "REF_FEEDFORWARD.h"
+#include "DistFF.h"
+#include "pid_control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,7 +76,7 @@ typedef enum {
   STATE_INIT,
   STATE_IDLE,
   STATE_HOMING_FAST,     // sweep left at fast speed until sensor triggers
-  STATE_HOMING_BACKOFF,  // move right 20° (PID) to clear sensor zone
+  STATE_HOMING_BACKOFF,  // direct PWM right to clear sensor zone
   STATE_HOMING_SLOW,     // creep left slowly until sensor triggers again
   STATE_MANUAL,
   STATE_AUTO,            // P2P / direct position move
@@ -147,12 +150,27 @@ volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
 volatile uint8_t reed_grip = 0;   // gripper CLOSED
 
 // Homing system
+volatile uint8_t home_sensor_raw      = 0;     // 1 = triggered — watch in Live Expressions anytime
 volatile float   cumulative_angle_deg = 0.0f;  // total rotation from home (degrees, ISR-updated)
 volatile uint8_t homed                = 0;      // 1 = successfully homed this session
 volatile uint8_t homing_sensor_flag   = 0;      // set by EXTI callback, cleared by state machine
 volatile uint8_t homing_sensor_pending= 0;      // debounce: set in EXTI, validated in ISR
 
 // CAN Bus handle — declared by CubeMX at top of file (hfdcan1, PA11/PA12)
+
+// ── Reference Feedforward (model-based voltage FF) ───────────────────────────
+RefFF_t my_refff;
+DistFF_t my_distff;
+volatile uint8_t refff_enabled    = 0;      // 0=off, 1=on — toggle via Live Expressions
+volatile uint8_t distff_enabled   = 0;      // needs Kalman4 tau_d estimate to work
+volatile float   V_supply         = 24.0f;  // motor bus voltage (V)
+volatile float   g_distff_tau_d   = 0.0f;   // disturbance estimate input (from Kalman4 later)
+
+// ── Motor + Encoder direction invert ─────────────────────────────────────────
+volatile uint8_t motor_dir_inverted    = 0;     // 1 = flip PID PWM output
+volatile uint8_t encoder_inverted      = 0;     // 1 = flip encoder count direction
+volatile float   homing_backoff_speed  = 0.05f; // PWM fraction going RIGHT after fast trigger
+volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -286,16 +304,16 @@ DevDashboard_t dev_dash = {
   .Auto.target_deg    = 0.0f,
   .Auto.traj_type     = 0,       // 0=Trapezoid
   .Auto.time_mode     = 0,       // 0=constraint-based
-  .Auto.v_max         = 6.28f,   // π/2 rad/s (~0.25 rev/s)
-  .Auto.a_max         = 6.28f,   // π rad/s²
-  .Auto.j_max         = 10.0f,   // S-Curve jerk
-  .Auto.t1_seg        = 0.314f,
-  .Auto.t2_seg        = 0.186f,
-  .Auto.t_acc_seg     = 0.800f,   // control team: accurate mode
-  .Auto.t_cruise_seg  = 1.186f,
-  .Auto.kp_vel        = 10.0f,   // control team: accurate mode (fast: 15)
-  .Auto.ki_vel        = 0.5f,
-  .Auto.kd_vel        = 0.5f,
+  .Auto.v_max         = 6.28f,
+  .Auto.a_max         = 12.56f,  // control team
+  .Auto.j_max         = 10.0f,
+  .Auto.t1_seg        = 0.1f,
+  .Auto.t2_seg        = 0.1f,
+  .Auto.t_acc_seg     = 0.3f,    // control team
+  .Auto.t_cruise_seg  = 0.2f,
+  .Auto.kp_vel        = 30.0f,   // control team
+  .Auto.ki_vel        = 0.1f,
+  .Auto.kd_vel        = 0.0f,
   .Auto.kp_pos        = 1.0f,
   .Auto.ki_pos        = 0.0f,
   .Auto.kd_pos        = 0.0f,
@@ -332,7 +350,8 @@ PUTCHAR_PROTOTYPE { return ch; }
 static void eeprom_save(float angle_deg) { (void)angle_deg; /* TODO: Flash write */ }
 static float eeprom_load(void)           { return 0.0f;     /* TODO: Flash read  */ }
 
-// ── Enable HOME_SENSOR EXTI (rising edge, PULLDOWN) ───────────────────────
+// ── Enable HOME_SENSOR EXTI — PC3, RISING edge, PULLUP ───────────────────
+// Normal: NPN sinks → LOW(0). Blade detected: NPN off → PULLUP → HIGH(1).
 static void homing_exti_enable(void) {
   __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
   homing_sensor_flag   = 0;
@@ -340,17 +359,20 @@ static void homing_exti_enable(void) {
   GPIO_InitTypeDef g   = {0};
   g.Pin       = HOME_SENSOR_Pin;
   g.Mode      = GPIO_MODE_IT_RISING;
-  g.Pull      = GPIO_PULLDOWN;
+  g.Pull      = GPIO_PULLUP;
   HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 }
 
-// ── Disable HOME_SENSOR EXTI (back to plain input) ───────────────────────
+// ── Disable HOME_SENSOR EXTI ──────────────────────────────────────────────
 static void homing_exti_disable(void) {
+  HAL_NVIC_DisableIRQ(EXTI3_IRQn);
   __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
   GPIO_InitTypeDef g = {0};
   g.Pin  = HOME_SENSOR_Pin;
   g.Mode = GPIO_MODE_INPUT;
-  g.Pull = GPIO_PULLDOWN;
+  g.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
 }
 
@@ -371,6 +393,8 @@ static void finish_homing(void) {
   motor_speed_cmd          = 0.0f;
   __enable_irq();
   homed = 1;
+  RefFF_Reset(&my_refff);
+  DistFF_Reset(&my_distff);
   eeprom_save(0.0f);
   current_state = STATE_IDLE;
   mb_slave.registers[0x27] = 0;
@@ -540,6 +564,26 @@ int main(void)
   Trapezoid_Init(&g_trapezoid, dev_dash.Auto.v_max, dev_dash.Auto.a_max, 0.001f);
   SCurve_Init(&g_scurve, dev_dash.Auto.v_max, dev_dash.Auto.a_max, dev_dash.Auto.j_max, 0.001f);
 
+  // Reference Feedforward — exact control team parameters
+  RefFF_Init(&my_refff,
+      0.027f,      // J_eq  kg·m²
+      0.0012794f,  // L     H
+      2.8f,        // R     Ω
+      0.3f,        // b_eq  N·m·s/rad
+      50.0f,       // N     gear ratio
+      0.0045f,     // Kt    N·m/A
+      0.005f,      // Ke    V·s/rad
+      0.02f,       // tau   s
+      0.001f);     // Ts    s (1kHz)
+
+  DistFF_Init(&my_distff,
+      0.0012794f,  // L
+      2.8f,        // R
+      50.0f,       // N
+      0.0045f,     // Kt
+      0.02f,       // tau
+      0.001f);     // Ts
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -555,8 +599,8 @@ int main(void)
       // 0. Robust ESTOP Polling (Anti-EMI Noise)
       static uint8_t estop_debounce = 0;
       if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
-        if (estop_debounce < 5) estop_debounce++;
-        if (estop_debounce >= 3) { // Requires 30ms of solid LOW signal to trigger
+        if (estop_debounce < 25) estop_debounce++;
+        if (estop_debounce >= 20) { // Requires 200ms of solid LOW signal to trigger
           current_state = STATE_EMER;
           __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
           HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
@@ -570,6 +614,7 @@ int main(void)
       reed_up   = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port,   REED_UP_Pin)   == REED_ACTIVE) ? 1 : 0;
       reed_down = (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == REED_ACTIVE) ? 1 : 0;
       reed_grip = (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == REED_ACTIVE) ? 1 : 0;
+      home_sensor_raw = (HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin) == HOME_SENSOR_ACTIVE) ? 1 : 0;
 
       // 1. Read ADC Current Sensor (with Moving Average Filter)
             if (HAL_ADC_Start(&hadc2) == HAL_OK) {
@@ -786,7 +831,11 @@ int main(void)
           dev_dash.Auto.pos_err        = 0.0f;
           vel_filtered                 = 0.0f;
           __enable_irq();
-          sethome_led_cnt              = 1;
+          homed           = 1;
+          cumulative_angle_deg = 0.0f;
+          RefFF_Reset(&my_refff);
+          DistFF_Reset(&my_distff);
+          sethome_led_cnt = 1;
         }
       }
 
@@ -941,7 +990,7 @@ int main(void)
             float ft = fine_tune_speed;
             if (ft < 0.01f) ft = 0.01f;
             if (ft > 1.0f)  ft = 1.0f;
-            safe_speed = fine_right ? ft : -ft;
+            safe_speed = fine_left ? ft : -ft;
             joy_ramp = 0.0f;  // reset so stick doesn't jump after fine tune
           } else {
             // Normal: RT + Left-stick Y with ramp
@@ -1075,9 +1124,9 @@ int main(void)
               if (joy_rt_f() > 0.5f) {
                 motor_speed_cmd = joy_ly_f();              // normal speed
               } else if (joy_btn(BTN_DPAD_LEFT)) {
-                motor_speed_cmd = -0.08f;                  // fine tune reverse
+                motor_speed_cmd =  (fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
               } else if (joy_btn(BTN_DPAD_RIGHT)) {
-                motor_speed_cmd =  0.08f;                  // fine tune forward
+                motor_speed_cmd = -(fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
               } else {
                 motor_speed_cmd = 0.0f;
               }
@@ -1106,24 +1155,22 @@ int main(void)
             if (homing_sensor_flag) {
               homing_sensor_flag = 0;
               motor_speed_cmd    = 0.0f;
-              // Backoff: PID move +20° from current position
-              float back_deg = my_encoder.position_rad * (180.0f / 3.14159265f) + HOMING_BACKOFF_DEG;
-              start_move_deg(back_deg);
-              current_state = STATE_HOMING_BACKOFF;
+              current_state      = STATE_HOMING_BACKOFF;
             }
             if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
             break;
 
           case STATE_HOMING_BACKOFF: {
             mb_slave.registers[0x27] = 0x01;
-            // PID runs via ISR (condition updated to include this state)
-            uint8_t back_done = (!g_scurve.is_active && !g_trapezoid.is_active &&
-                                  fabsf(vel_filtered) < 0.05f);
-            if (back_done) {
-              homing_exti_enable(); // re-enable EXTI for slow pass
-              current_state = STATE_HOMING_SLOW;
+            static uint32_t back_tick = 0;
+            motor_speed_cmd = homing_backoff_speed; // direct PWM right (no PID)
+            if (++back_tick >= homing_backoff_ticks) {
+              back_tick       = 0;
+              motor_speed_cmd = 0.0f;
+              homing_exti_enable();
+              current_state   = STATE_HOMING_SLOW;
             }
-            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+            if (joy_is_connected() && joy_btn(BTN_LB)) { back_tick = 0; current_state = STATE_EMER; }
             break;
           }
 
@@ -1149,10 +1196,14 @@ int main(void)
               if (joy_btn(BTN_B)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
               
               if (joy_rt_f() > 0.5f) {
-                motor_speed_cmd = joy_ly_f(); // Deadband is applied inside joy_ly_f
+                motor_speed_cmd = joy_ly_f();
+              } else if (joy_btn(BTN_DPAD_LEFT)) {
+                motor_speed_cmd =  (fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
+              } else if (joy_btn(BTN_DPAD_RIGHT)) {
+                motor_speed_cmd = -(fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
               } else {
                 motor_speed_cmd = 0.0f;
-                if (joy_ly_f() == 0.0f) current_state = STATE_IDLE; 
+                if (joy_ly_f() == 0.0f) current_state = STATE_IDLE;
               }
             } else {
               // Modbus Jog: signed degrees → S-curve incremental move
@@ -1393,8 +1444,10 @@ int main(void)
           seq3_prev = seq3;
         }
         
-        // Apply Motor Command — STATE_AUTO handles its own PWM in TIM7 ISR
-        if (current_state != STATE_AUTO) {
+        // Apply Motor Command — PID states handle their own PWM in TIM7 ISR
+        if (current_state != STATE_AUTO &&
+            current_state != STATE_SEQUENCE &&
+            current_state != STATE_TEST) {
           static float prod_ramp = 0.0f;
           static uint8_t prod_dead_cnt = 0;
           float prod_raw = motor_speed_cmd;
@@ -1479,15 +1532,10 @@ int main(void)
           G = 1; Y = 1;
 
         } else if (current_state == STATE_AUTO) {
-          // P2P: Green steady when settled, 4Hz blink when moving
-          uint8_t moving = (g_scurve.is_active || g_trapezoid.is_active ||
-                            fabsf(vel_filtered) > 0.05f);
-          G = moving ? ((tl_tick % 12) < 6 ? 1 : 0) : 1;
+          G = 1;
 
         } else if (current_state == STATE_SEQUENCE) {
-          // Sequence: Green + Yellow blink 2Hz in phase — distinctive double-blink
-          uint8_t ph = (tl_tick % 50) < 25 ? 1 : 0;
-          G = ph; Y = ph;
+          G = 1; Y = 1;
 
         } else if (current_state == STATE_TEST) {
           // Test: Green steady + Yellow 2Hz blink
@@ -1766,7 +1814,7 @@ static void MX_LPUART1_UART_Init(void)
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
   hlpuart1.Init.BaudRate = 19200;
-  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_9B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
   hlpuart1.Init.Parity = UART_PARITY_EVEN;
   hlpuart1.Init.Mode = UART_MODE_TX_RX;
@@ -2042,11 +2090,11 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GRIPPER_Pin|EMER_OUTPUT_Pin|RESET_LED_Pin|TOWER_Y_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : RESET_BTN_Pin */
-  GPIO_InitStruct.Pin = RESET_BTN_Pin;
+  /*Configure GPIO pins : RESET_BTN_Pin HOME_SENSOR_Pin */
+  GPIO_InitStruct.Pin = RESET_BTN_Pin|HOME_SENSOR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(RESET_BTN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : POWER_LATCH_Pin PNEUMATIC_Pin TOWER_G_Pin TOWER_R_Pin */
   GPIO_InitStruct.Pin = POWER_LATCH_Pin|PNEUMATIC_Pin|TOWER_G_Pin|TOWER_R_Pin;
@@ -2074,8 +2122,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(REED_GRIP_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : POWER_BTN_Pin ESTOP_Pin HOME_SENSOR_Pin */
-  GPIO_InitStruct.Pin = POWER_BTN_Pin|ESTOP_Pin|HOME_SENSOR_Pin;
+  /*Configure GPIO pins : POWER_BTN_Pin ESTOP_Pin */
+  GPIO_InitStruct.Pin = POWER_BTN_Pin|ESTOP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -2178,10 +2226,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       // cumulative_angle_deg is reset only by finish_homing(), not by set_home
     }
 
-    // Direction-negated windowed velocity (hardware counts down when moving forward)
+    // Encoder direction — set encoder_inverted=1 in Live Expressions if position goes wrong way
     {
       int16_t hw_delta = (int16_t)(enc_now - my_encoder.last_counter_value);
-      int32_t delta    = -(int32_t)hw_delta;
+      int32_t delta    = encoder_inverted ? (int32_t)hw_delta : -(int32_t)hw_delta;
       my_encoder.last_counter_value = enc_now;
       my_encoder.count_accum       += delta;
       my_encoder.position_rad       = (float)my_encoder.count_accum * COUNTS_TO_RAD;
@@ -2225,7 +2273,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
     // ── AUTO CONTROL @ 1kHz ──────────────────────────────────────────────────
     if ((current_state == STATE_AUTO     || current_state == STATE_SEQUENCE ||
-         current_state == STATE_TEST     || current_state == STATE_HOMING_BACKOFF)
+         current_state == STATE_TEST)
         && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
 
       // Trajectory reference
@@ -2260,74 +2308,72 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
       float pos_rad = my_encoder.position_rad;
       float pos_err = ideal_pos - pos_rad;
+      float vel_sp  = ideal_vel;
+      float pwm_pct = 0.0f;
 
-      // ── Outer: Position PID → velocity setpoint ───────────────────────────
-      // Clamp accumulator directly (control team's anti-windup — prevents runaway)
-      ctrl_pos_integral += pos_err * LOOP_DT;
-      if (dev_dash.Auto.ki_pos > 1e-6f) {
-        float lim = dev_dash.Auto.v_max / dev_dash.Auto.ki_pos;
-        if (ctrl_pos_integral >  lim) ctrl_pos_integral =  lim;
-        if (ctrl_pos_integral < -lim) ctrl_pos_integral = -lim;
-      }
-      // D-term: use -velocity (less noisy than differencing position error)
-      float vel_sp = dev_dash.Auto.kp_pos * pos_err
-                   + dev_dash.Auto.ki_pos  * ctrl_pos_integral
-                   - dev_dash.Auto.kd_pos  * vel_filtered
-                   + ideal_vel;
-
-      // ── Inner: Velocity PID → PWM% ────────────────────────────────────────
-      float vel_err = vel_sp - vel_filtered;
-      static float prev_vel_err_isr = 0.0f;
-      float d_vel = (vel_err - prev_vel_err_isr) * 1000.0f;
-      prev_vel_err_isr = vel_err;
-
-      // Accumulator anti-windup: clamp BEFORE adding to integral
-      ctrl_vel_integral += vel_err * LOOP_DT;
-      float max_vel_int = (dev_dash.Auto.ki_vel > 1e-6f)
-                        ? (100.0f / dev_dash.Auto.ki_vel) : 100.0f;
-      if (ctrl_vel_integral >  max_vel_int) ctrl_vel_integral =  max_vel_int;
-      if (ctrl_vel_integral < -max_vel_int) ctrl_vel_integral = -max_vel_int;
-
-      float pwm_pct = dev_dash.Auto.kp_vel * vel_err
-                    + dev_dash.Auto.ki_vel  * ctrl_vel_integral
-                    + dev_dash.Auto.kd_vel  * d_vel
-                    + ideal_acc * ff_gain;   // acceleration feedforward
-
-      if (dev_dash.Auto.motor_invert) pwm_pct = -pwm_pct;
-      if (pwm_pct >  100.0f) pwm_pct =  100.0f;
-      if (pwm_pct < -100.0f) pwm_pct = -100.0f;
-
-      // Hard stop when trajectory done and motor settled
-      uint8_t traj_done = (dev_dash.Auto.traj_type == 0) ? (!g_trapezoid.is_active) :
-                          (dev_dash.Auto.traj_type == 1) ? (!g_scurve.is_active)    : 1;
-      if (traj_done && fabsf(pos_err) < 0.035f && fabsf(vel_filtered) < 0.1f) {
-        pwm_pct           = 0.0f;
-        ctrl_vel_integral = 0.0f;
-        ctrl_pos_integral = 0.0f;
-      }
-
-      // Apply PWM: dead zone 2% + min_pwm_threshold (overcome static friction)
-      float spd      = pwm_pct / 100.0f;
-      float min_frac = min_pwm_pct / 100.0f;
-      if (spd >  dev_dash.Ctrl.max_speed) spd =  dev_dash.Ctrl.max_speed;
-      if (spd < -dev_dash.Ctrl.max_speed) spd = -dev_dash.Ctrl.max_speed;
-      uint32_t pwm_cnt;
-      if (spd > 0.02f) {
-        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
-        if (spd < min_frac) spd = min_frac;
-        pwm_cnt = (uint32_t)(spd * (float)htim3.Init.Period);
-      } else if (spd < -0.02f) {
-        HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
-        spd = -spd;
-        if (spd < min_frac) spd = min_frac;
-        pwm_cnt = (uint32_t)(spd * (float)htim3.Init.Period);
+      if (!pid_enabled || hard_stop_active) {
+        // PID frozen — hold zero, reset integrators
+        Velocity_PID_Reset();
+        Position_PID_Reset();
+        hard_stop_active = 0;
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+        motor_speed_cmd = 0.0f;
       } else {
-        pwm_cnt = 0;
+        // ── Outer: Position PID → velocity setpoint ──────────────────────────
+        vel_sp = Position_PID(pos_err, vel_filtered, LOOP_DT) + ideal_vel;
+
+        // ── Inner: Velocity PID → PWM% ────────────────────────────────────────
+        float vel_err = vel_sp - vel_filtered;
+        pwm_pct = Velocity_PID(vel_err, LOOP_DT);
+
+        // Reference Feedforward: model-based voltage → PWM%
+        if (refff_enabled && V_supply > 0.1f) {
+          float v_ff = RefFF_Update(&my_refff, ideal_vel);
+          pwm_pct += v_ff / V_supply * 100.0f;
+        }
+        // Disturbance Feedforward: compensation via Kalman4 tau_d estimate
+        if (distff_enabled && V_supply > 0.1f) {
+          float v_dff = DistFF_Update(&my_distff, g_distff_tau_d);
+          pwm_pct += v_dff / V_supply * 100.0f;
+        }
+
+        // Motor direction invert
+        if (motor_dir_inverted || dev_dash.Auto.motor_invert) pwm_pct = -pwm_pct;
+        if (pwm_pct >  100.0f) pwm_pct =  100.0f;
+        if (pwm_pct < -100.0f) pwm_pct = -100.0f;
+
+        // Hard stop when trajectory done and motor settled
+        uint8_t traj_done = (dev_dash.Auto.traj_type == 0) ? (!g_trapezoid.is_active) :
+                            (dev_dash.Auto.traj_type == 1) ? (!g_scurve.is_active)    : 1;
+        if (traj_done && fabsf(pos_err) < 0.035f && fabsf(vel_filtered) < 0.1f) {
+          pwm_pct = 0.0f;
+          Velocity_PID_Reset();
+          Position_PID_Reset();
+        }
+
+        // Apply PWM: 2% dead zone + min_pwm threshold
+        float spd      = pwm_pct / 100.0f;
+        float min_frac = min_pwm_pct / 100.0f;
+        if (spd >  dev_dash.Ctrl.max_speed) spd =  dev_dash.Ctrl.max_speed;
+        if (spd < -dev_dash.Ctrl.max_speed) spd = -dev_dash.Ctrl.max_speed;
+        uint32_t pwm_cnt;
+        if (spd > 0.02f) {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
+          if (spd < min_frac) spd = min_frac;
+          pwm_cnt = (uint32_t)(spd * (float)htim3.Init.Period);
+        } else if (spd < -0.02f) {
+          HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
+          spd = -spd;
+          if (spd < min_frac) spd = min_frac;
+          pwm_cnt = (uint32_t)(spd * (float)htim3.Init.Period);
+        } else {
+          pwm_cnt = 0;
+        }
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_cnt);
+        motor_speed_cmd = pwm_pct / 100.0f;
       }
-      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_cnt);
 
       // Update shared status
-      motor_speed_cmd             = pwm_pct / 100.0f;
       dev_dash.Auto.pos_rad       = pos_rad;
       dev_dash.Auto.vel_rad_s     = vel_filtered;
       dev_dash.Auto.pos_ideal     = ideal_pos;
@@ -2343,7 +2389,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     // Safety: ถ้าเพิ่งออกจาก STATE_AUTO → force PWM=0 ทันทีใน ISR tick ถัดไป
     {
       static uint8_t isr_was_auto = 0;
-      if (current_state == STATE_AUTO || current_state == STATE_SEQUENCE || current_state == STATE_TEST) {
+      if (current_state == STATE_AUTO     || current_state == STATE_SEQUENCE ||
+          current_state == STATE_TEST) {
         isr_was_auto = 1;
       } else if (isr_was_auto) {
         isr_was_auto = 0;

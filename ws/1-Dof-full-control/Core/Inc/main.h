@@ -71,6 +71,8 @@ void Error_Handler(void);
 #define RCC_OSC_OUT_GPIO_Port GPIOF
 #define POWER_LATCH_Pin GPIO_PIN_1
 #define POWER_LATCH_GPIO_Port GPIOC
+#define HOME_SENSOR_Pin GPIO_PIN_3
+#define HOME_SENSOR_GPIO_Port GPIOC
 #define MOTOR_DIR_Pin GPIO_PIN_0
 #define MOTOR_DIR_GPIO_Port GPIOA
 #define REED_UP_Pin GPIO_PIN_1
@@ -110,8 +112,6 @@ void Error_Handler(void);
 #define MODE_Pin GPIO_PIN_5
 #define MODE_GPIO_Port GPIOB
 #define MODE_EXTI_IRQn EXTI9_5_IRQn
-#define HOME_SENSOR_Pin GPIO_PIN_6
-#define HOME_SENSOR_GPIO_Port GPIOB
 #define TOWER_Y_Pin GPIO_PIN_7
 #define TOWER_Y_GPIO_Port GPIOB
 
@@ -144,16 +144,17 @@ void Error_Handler(void);
 #define REED_ACTIVE  GPIO_PIN_RESET   /* active LOW (NC + PULLDOWN + 3V3 COM) */
 
 /* --- Home Sensor (proximity PNP → opto-isolator → GPIO) ----------------
- * Pin: PB6 (final PCB: PC5) — EXTI rising edge, PULLDOWN
- * Signal: HIGH = object detected (rising edge = blade enters sensor)
+ * Pin: PC3 — EXTI rising edge, PULLUP
+ * Normal (no blade): NPN sinks → LOW (0) = not triggered
+ * Triggered (blade): NPN off → PULLUP → HIGH (1) = triggered
  * -------------------------------------------------------- */
-#define HOME_SENSOR_Pin       GPIO_PIN_6
-#define HOME_SENSOR_GPIO_Port GPIOB
-#define HOME_SENSOR_ACTIVE    GPIO_PIN_SET   /* active HIGH */
+#define HOME_SENSOR_Pin       GPIO_PIN_3
+#define HOME_SENSOR_GPIO_Port GPIOC
+#define HOME_SENSOR_ACTIVE    GPIO_PIN_SET   /* active HIGH — rising edge */
 
 /* --- Homing parameters ------------------------------------------------- */
 #define HOMING_FAST_SPEED   0.25f   /* 25% PWM — fast sweep to find sensor  */
-#define HOMING_SLOW_SPEED   0.013f  /* ~5% of fast — slow precise approach  */
+#define HOMING_SLOW_SPEED   0.06f   /* 6% PWM — minimum that moves motor    */
 #define HOMING_BACKOFF_DEG  20.0f   /* degrees to back off after first hit  */
 #define MAX_ANGLE_DEG       540.0f  /* +1.5 rev soft limit                  */
 #define MIN_ANGLE_DEG      -540.0f  /* -1.5 rev soft limit                  */

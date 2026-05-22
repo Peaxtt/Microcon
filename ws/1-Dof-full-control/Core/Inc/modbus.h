@@ -5,7 +5,7 @@
 
 #define MODBUS_SLAVE_ID 21
 #define MODBUS_BUF_SIZE 256
-#define MODBUS_REG_COUNT 50
+#define MODBUS_REG_COUNT 64   // 0x00..0x3F — custom regs up to 0x3F
 
 typedef struct {
   uint16_t registers[MODBUS_REG_COUNT];

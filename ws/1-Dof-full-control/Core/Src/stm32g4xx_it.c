@@ -43,7 +43,6 @@
 /* USER CODE BEGIN PV */
 extern DMA_HandleTypeDef hdma_usart3_rx;
 extern UART_HandleTypeDef huart3;
-extern UART_HandleTypeDef huart4;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -258,7 +257,6 @@ void EXTI9_5_IRQHandler(void)
 
   /* USER CODE END EXTI9_5_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(MODE_Pin);
-  HAL_GPIO_EXTI_IRQHandler(HOME_SENSOR_Pin); // homing sensor (PB6, EXTI6)
   /* USER CODE BEGIN EXTI9_5_IRQn 1 */
 
   /* USER CODE END EXTI9_5_IRQn 1 */
@@ -321,8 +319,8 @@ void LPUART1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-void UART4_IRQHandler(void)
+void EXTI3_IRQHandler(void)
 {
-  HAL_UART_IRQHandler(&huart4);
+  HAL_GPIO_EXTI_IRQHandler(HOME_SENSOR_Pin); // PC3 — homing sensor
 }
 /* USER CODE END 1 */
