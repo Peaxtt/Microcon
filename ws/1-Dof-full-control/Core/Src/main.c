@@ -67,15 +67,18 @@ TIM_HandleTypeDef htim7;
 uint8_t joy_dma_buf[PKT_LEN * 2];
 ModbusSlave_t mb_slave;
 
-// Telemetry UART4 (PB9=TX, PB8=RX) → Simulink
-UART_HandleTypeDef huart4;
+// (UART4 removed — RP2040 is on USART3/PC10-PC11, PB8/PB9 remain free GPIO)
 
 typedef enum {
   STATE_INIT,
   STATE_IDLE,
-  STATE_CALIBRATE,
+  STATE_HOMING_FAST,     // sweep left at fast speed until sensor triggers
+  STATE_HOMING_BACKOFF,  // move right 20° (PID) to clear sensor zone
+  STATE_HOMING_SLOW,     // creep left slowly until sensor triggers again
   STATE_MANUAL,
-  STATE_AUTO,
+  STATE_AUTO,            // P2P / direct position move
+  STATE_SEQUENCE,        // Modbus multi-step pick/place (0x22 pair count)
+  STATE_TEST,            // Precision / performance test (0x01 bit4)
   STATE_EMER
 } RobotState_t;
 
@@ -116,10 +119,38 @@ volatile float ff_gain      = 0.0f;      // acceleration feedforward [%/(rad/s²
 volatile float seq_delay_s     = 0.5f;   // delay between each sequence step (seconds)
 volatile float fine_tune_speed = 0.02f;  // DPAD fine-tune PWM fraction (0.0–1.0), ~2% default
 
+// Telemetry flag — default OFF (BaseSystem uses Modbus on same UART, telemetry corrupts it)
+// Set to 1 via Live Expression when using Python GUI instead of BaseSystem
+volatile uint8_t enable_telemetry = 0;
+
+// Sequence execution state (Modbus-triggered, production mode)
+typedef enum {
+  SEQ_MB_IDLE = 0,
+  SEQ_MB_GOING_PICK,
+  SEQ_MB_PICKING,
+  SEQ_MB_GOING_PLACE,
+  SEQ_MB_PLACING,
+} SeqMBState_t;
+static SeqMBState_t seq_mb_state = SEQ_MB_IDLE;
+static uint8_t  seq_mb_pair_idx  = 0;   // current pair index
+static uint32_t seq_mb_timer     = 0;   // 100Hz ticks
+
+// Test mode state
+typedef enum { TEST_IDLE=0, TEST_GOING_END, TEST_GOING_START } TestState_t;
+static TestState_t test_state     = TEST_IDLE;
+static int16_t     test_repeat    = 0;
+static uint8_t     test_mv_armed  = 0;   // 1 = next tick should start move
+
 // Reed switch states — updated every 100Hz tick (active LOW: 1 = triggered)
 volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
 volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
 volatile uint8_t reed_grip = 0;   // gripper CLOSED
+
+// Homing system
+volatile float   cumulative_angle_deg = 0.0f;  // total rotation from home (degrees, ISR-updated)
+volatile uint8_t homed                = 0;      // 1 = successfully homed this session
+volatile uint8_t homing_sensor_flag   = 0;      // set by EXTI callback, cleared by state machine
+volatile uint8_t homing_sensor_pending= 0;      // debounce: set in EXTI, validated in ISR
 
 // CAN Bus handle — declared by CubeMX at top of file (hfdcan1, PA11/PA12)
 
@@ -260,17 +291,16 @@ DevDashboard_t dev_dash = {
   .Auto.j_max         = 10.0f,   // S-Curve jerk
   .Auto.t1_seg        = 0.314f,
   .Auto.t2_seg        = 0.186f,
-  .Auto.t_acc_seg     = 0.500f,
+  .Auto.t_acc_seg     = 0.800f,   // control team: accurate mode
   .Auto.t_cruise_seg  = 1.186f,
-  .Auto.kp_vel        = 20.0f,
-  .Auto.ki_vel        = 1.1f,   // เริ่มที่ 0 — ค่อยเพิ่มทีละ 0.05 หลัง P ทำงานได้
-  .Auto.kd_vel        = 0.0f,
+  .Auto.kp_vel        = 10.0f,   // control team: accurate mode (fast: 15)
+  .Auto.ki_vel        = 0.5f,
+  .Auto.kd_vel        = 0.5f,
   .Auto.kp_pos        = 1.0f,
   .Auto.ki_pos        = 0.0f,
   .Auto.kd_pos        = 0.0f,
 };
 
-static float filtered_adc = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -286,7 +316,6 @@ static void MX_ADC2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
-static void UART4_Init(void);
 static void Send_Telemetry(void);
 /* USER CODE END PFP */
 
@@ -297,11 +326,89 @@ static void Send_Telemetry(void);
 #else
   #define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
 #endif
-PUTCHAR_PROTOTYPE {
-  // Use HAL_UART_Transmit for debug output (careful with Modbus on same port)
-  // For now, let's assume LPUART1 is dedicated to Modbus if UI is active.
-  // If user wants debug, we can use another port or conditional compile.
-  return ch;
+PUTCHAR_PROTOTYPE { return ch; }
+
+// ── EEPROM stubs (implement Flash write when hardware is ready) ───────────
+static void eeprom_save(float angle_deg) { (void)angle_deg; /* TODO: Flash write */ }
+static float eeprom_load(void)           { return 0.0f;     /* TODO: Flash read  */ }
+
+// ── Enable HOME_SENSOR EXTI (rising edge, PULLDOWN) ───────────────────────
+static void homing_exti_enable(void) {
+  __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
+  homing_sensor_flag   = 0;
+  homing_sensor_pending= 0;
+  GPIO_InitTypeDef g   = {0};
+  g.Pin       = HOME_SENSOR_Pin;
+  g.Mode      = GPIO_MODE_IT_RISING;
+  g.Pull      = GPIO_PULLDOWN;
+  HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
+}
+
+// ── Disable HOME_SENSOR EXTI (back to plain input) ───────────────────────
+static void homing_exti_disable(void) {
+  __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
+  GPIO_InitTypeDef g = {0};
+  g.Pin  = HOME_SENSOR_Pin;
+  g.Mode = GPIO_MODE_INPUT;
+  g.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
+}
+
+// ── Finish homing: zero encoder + cumulative, mark homed ─────────────────
+static void finish_homing(void) {
+  homing_exti_disable();
+  homing_sensor_flag   = 0;
+  // Zero encoder (processed next 1kHz tick)
+  __disable_irq();
+  enc_reset_pending        = 1;
+  cumulative_angle_deg     = 0.0f;
+  ctrl_direct_target       = 0.0f;
+  ctrl_traj_start          = 0.0f;
+  ctrl_vel_integral        = 0.0f;
+  ctrl_pos_integral        = 0.0f;
+  g_scurve.is_active       = 0;
+  g_trapezoid.is_active    = 0;
+  motor_speed_cmd          = 0.0f;
+  __enable_irq();
+  homed = 1;
+  eeprom_save(0.0f);
+  current_state = STATE_IDLE;
+  mb_slave.registers[0x27] = 0;
+}
+
+// Start a trajectory move to target_deg (degrees) from current encoder position.
+// Selects Trapezoid or S-Curve based on dev_dash.Auto.traj_type.
+// Returns 0 if rejected by soft limit, 1 if started.
+static void start_move_deg(float deg)
+{
+  // Soft limit: reject if target exceeds ±540° from home (only when homed)
+  if (homed && (deg > MAX_ANGLE_DEG || deg < MIN_ANGLE_DEG)) return;
+  ctrl_vel_integral = 0.0f;
+  ctrl_pos_integral = 0.0f;
+  float target_rad  = deg * (3.14159265f / 180.0f);
+  float pos_now     = my_encoder.position_rad;
+  ctrl_direct_target = target_rad;
+  ctrl_traj_start    = pos_now;
+  float disp         = target_rad - pos_now;
+
+  g_scurve.v_max    = dev_dash.Auto.v_max;
+  g_scurve.a_max    = dev_dash.Auto.a_max;
+  g_scurve.j_max    = dev_dash.Auto.j_max;
+  g_trapezoid.v_max = dev_dash.Auto.v_max;
+  g_trapezoid.a_max = dev_dash.Auto.a_max;
+
+  if (dev_dash.Auto.traj_type == 0) {
+    if (dev_dash.Auto.time_mode)
+      Trapezoid_SetTarget_ByTime(&g_trapezoid, disp, dev_dash.Auto.t_acc_seg, dev_dash.Auto.t_cruise_seg);
+    else
+      Trapezoid_SetTarget(&g_trapezoid, disp);
+  } else if (dev_dash.Auto.traj_type == 1) {
+    if (dev_dash.Auto.time_mode)
+      SCurve_SetTarget_ByTime(&g_scurve, disp, dev_dash.Auto.t1_seg, dev_dash.Auto.t2_seg, dev_dash.Auto.t_cruise_seg);
+    else
+      SCurve_SetTarget(&g_scurve, disp);
+  }
+  // traj_type == 2: direct position (no trajectory, ISR uses ctrl_direct_target)
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
@@ -363,12 +470,12 @@ int main(void)
   MX_TIM3_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
-  // EMER (ESTOP_Pin): active LOW — pin LOW = กด, ใช้ PULLUP
+  // EMER (ESTOP_Pin PB13): active LOW, PULLUP — polled in 100Hz loop
   // MODE selector: PULLUP (LOW=AUTO, HIGH=MANUAL)
   {
     GPIO_InitTypeDef g = {0};
     g.Pin  = ESTOP_Pin;
-    g.Mode = GPIO_MODE_IT_FALLING;
+    g.Mode = GPIO_MODE_INPUT;   // poll-based, no EXTI needed
     g.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(ESTOP_GPIO_Port, &g);
     g.Pin  = MODE_Pin;
@@ -397,6 +504,12 @@ int main(void)
   // Refresh Watchdog
   HAL_IWDG_Refresh(&hiwdg);
   
+  // HOME_SENSOR: plain input (EXTI enabled only during homing)
+  homing_exti_disable();
+  // Load cumulative angle from EEPROM — always home on startup for now
+  cumulative_angle_deg = eeprom_load();
+  homed = 0; // must home every session until Flash persistence is implemented
+
   current_state = STATE_IDLE;
   mb_slave.registers[0x00] = 22881; // Initialize Heartbeat (YA)
   
@@ -427,8 +540,6 @@ int main(void)
   Trapezoid_Init(&g_trapezoid, dev_dash.Auto.v_max, dev_dash.Auto.a_max, 0.001f);
   SCurve_Init(&g_scurve, dev_dash.Auto.v_max, dev_dash.Auto.a_max, dev_dash.Auto.j_max, 0.001f);
 
-  // Init Telemetry UART (UART4: PB9=TX, PB8=RX, 115200 8N1)
-  UART4_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -514,26 +625,24 @@ int main(void)
         float target_rad = (float)((int16_t)mb_slave.registers[11]) / 1000.0f;
         dev_dash.Auto.target_deg = target_rad * (180.0f / 3.14159265f);
         
-        // Trajectory overrides (Registers 16-19)
-        if (mb_slave.registers[16] <= 2) {
-             dev_dash.Auto.traj_type = (uint8_t)mb_slave.registers[16];
+        // Trajectory overrides (moved to 0x38-0x3F, clear of BaseSystem map)
+        if (mb_slave.registers[0x38] <= 2) {
+             dev_dash.Auto.traj_type = (uint8_t)mb_slave.registers[0x38];
         }
-        if (mb_slave.registers[17] > 0) {
-             dev_dash.Auto.v_max = (float)mb_slave.registers[17] / 100.0f;
+        if (mb_slave.registers[0x39] > 0) {
+             dev_dash.Auto.v_max = (float)mb_slave.registers[0x39] / 100.0f;
         }
-        if (mb_slave.registers[18] > 0) {
-             dev_dash.Auto.a_max = (float)mb_slave.registers[18] / 100.0f;
+        if (mb_slave.registers[0x3B] > 0) {
+             dev_dash.Auto.a_max = (float)mb_slave.registers[0x3B] / 100.0f;
         }
-        if (mb_slave.registers[19] > 0) {
-             dev_dash.Auto.j_max = (float)mb_slave.registers[19] / 100.0f;
+        if (mb_slave.registers[0x3C] > 0) {
+             dev_dash.Auto.j_max = (float)mb_slave.registers[0x3C] / 100.0f;
         }
-        if (mb_slave.registers[20] > 0) {
-             dev_dash.Auto.kp_pos = (float)mb_slave.registers[20] / 100.0f;
+        if (mb_slave.registers[0x3D] > 0) {
+             dev_dash.Auto.kp_pos = (float)mb_slave.registers[0x3D] / 100.0f;
         }
-        // Reg 22: kd_pos × 100  (position D via -velocity — key for pendulum damping)
-        dev_dash.Auto.kd_pos = (float)mb_slave.registers[22] / 100.0f;
-        // Reg 23: ki_pos × 100
-        dev_dash.Auto.ki_pos = (float)mb_slave.registers[23] / 100.0f;
+        dev_dash.Auto.kd_pos = (float)mb_slave.registers[0x3E] / 100.0f;
+        dev_dash.Auto.ki_pos = (float)mb_slave.registers[0x3F] / 100.0f;
 
         dev_dash.Auto.start_move = 1;
         
@@ -574,9 +683,16 @@ int main(void)
                                  (reed_down ? 2 : 0) |
                                  (reed_grip ? 4 : 0);
       
-      mb_slave.registers[0x28] = (int16_t)current_position; 
-      mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET) ? 1 : 0;
-      mb_slave.registers[0x04] = (uint16_t)(current_sensor_A * 1000.0f); // Modbus เก็บเป็น mA (int)
+      // Position: degrees × 10 (signed int16) — BaseSystem divides by 10 for display
+      mb_slave.registers[0x28] = (int16_t)(my_encoder.position_rad * (180.0f / 3.14159265f) * 10.0f);
+      // Velocity: deg/s × 10
+      mb_slave.registers[0x29] = (int16_t)(vel_filtered * (180.0f / 3.14159265f) * 10.0f);
+      // Acceleration: deg/s² × 10
+      mb_slave.registers[0x30] = (int16_t)(ctrl_acc_rad_s2 * (180.0f / 3.14159265f) * 10.0f);
+      // ESTOP: active LOW pin → 1 = emergency active (matches BaseSystem spec)
+      mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) ? 1 : 0;
+      // Current sensor moved to 0x3A (clear of BaseSystem register map)
+      mb_slave.registers[0x3A] = (uint16_t)(current_sensor_A * 1000.0f);
       
       // Heartbeat Logic
       static uint32_t hb_timer = 0;
@@ -595,8 +711,8 @@ int main(void)
       static GPIO_PinState last_mode_switch = (GPIO_PinState)2;
       GPIO_PinState current_mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
       if (current_mode_switch != last_mode_switch) {
-        if (current_state != STATE_EMER && current_state != STATE_CALIBRATE &&
-            dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+        if (current_state != STATE_EMER && current_state != STATE_SEQUENCE &&
+            current_state != STATE_TEST && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
           current_state = (current_mode_switch == GPIO_PIN_RESET) ? STATE_AUTO : STATE_IDLE;
         }
         last_mode_switch = current_mode_switch;
@@ -612,7 +728,10 @@ int main(void)
         HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_SET);
         mb_slave.registers[0x27] = 0;
         motor_speed_cmd = 0.0f;
-        uint8_t emer_rel = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET);
+        // ออก EMER: ต้องปล่อย ESTOP **และ** กด RESET button พร้อมกัน
+        uint8_t estop_released = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port,   ESTOP_Pin)     == GPIO_PIN_SET);
+        uint8_t reset_pressed  = (HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin) == GPIO_PIN_RESET);
+        uint8_t emer_rel = estop_released && reset_pressed;
         if (emer_rel) {
           dev_dash.Auto.start_move  = 0;
           dev_dash.Auto.cancel_move = 0;
@@ -893,23 +1012,28 @@ int main(void)
       } else {
 
         // --- NORMAL PRODUCTION MODE ---
-        // ตรวจจับ STATE_AUTO entry → init target = ตำแหน่งปัจจุบัน ป้องกันหมุนทันที
+        // ตรวจจับ entry เข้า PID states → init target = ตำแหน่งปัจจุบัน ป้องกันหมุนทันที
         static RobotState_t prev_state = STATE_INIT;
-        if (current_state == STATE_AUTO && prev_state != STATE_AUTO) {
+        uint8_t entering_pid_state = (
+          (current_state == STATE_AUTO     && prev_state != STATE_AUTO)     ||
+          (current_state == STATE_SEQUENCE && prev_state != STATE_SEQUENCE) ||
+          (current_state == STATE_TEST     && prev_state != STATE_TEST)
+        );
+        if (entering_pid_state) {
           float pos_now = current_position * RAD_PER_CNT;
           ctrl_direct_target    = pos_now;
           ctrl_traj_start       = pos_now;
           ctrl_vel_integral     = 0.0f;
           ctrl_pos_integral     = 0.0f;
           g_trapezoid.is_active = 0;
-          g_trapezoid.p_current = 0.0f; // clear residual ป้องกัน error ตอนกลับมา AUTO
+          g_trapezoid.p_current = 0.0f;
           g_trapezoid.v_current = 0.0f;
           g_scurve.is_active    = 0;
           g_scurve.p_current    = 0.0f;
           g_scurve.v_current    = 0.0f;
-          if (!dev_dash.Auto.start_move) // ไม่ override ถ้ามี pending move (เช่น Go Home)
+          if (!dev_dash.Auto.start_move)
             dev_dash.Auto.target_deg = pos_now * (180.0f / 3.14159f);
-          dev_dash.Auto.pos_err     = 0.0f;
+          dev_dash.Auto.pos_err = 0.0f;
         }
         prev_state = current_state;
 
@@ -958,34 +1082,71 @@ int main(void)
                 motor_speed_cmd = 0.0f;
               }
               if (joy_btn(BTN_L3) && joy_btn(BTN_R3)) current_state = STATE_EMER;
-              if (joy_lt_f() > 0.5f && joy_btn(BTN_X))  current_state = STATE_CALIBRATE;
+              if (joy_lt_f() > 0.5f && joy_btn(BTN_X)) { homing_exti_enable(); current_state = STATE_HOMING_FAST; }
             } else {
               motor_speed_cmd = 0.0f;
             }
-            // Modbus command overrides
-            if (mb_slave.registers[0x01] & 0x01) { current_state = STATE_CALIBRATE; mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL; mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x04) { current_state = STATE_AUTO;   mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x10) { dev_dash.Ctrl.mode = SYS_MODE_HARDWARE_TEST; mb_slave.registers[0x01] = 0; }
+            // Modbus command overrides (BaseSystem one-hot mode select)
+            if      (mb_slave.registers[0x01] & 0x01) { homing_exti_enable(); current_state = STATE_HOMING_FAST; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL;    mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x04) {
+              if (homed) { current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
+              mb_slave.registers[0x01] = 0;
+            }
+            else if (mb_slave.registers[0x01] & 0x08) { dev_dash.Auto.set_home = 1; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x10) {
+              if (homed) { current_state = STATE_TEST; test_state = TEST_GOING_END; test_mv_armed = 1; test_repeat = (int16_t)mb_slave.registers[0x11]; }
+              mb_slave.registers[0x01] = 0;
+            }
             break;
             
-          case STATE_CALIBRATE:
-            mb_slave.registers[0x27] = 1; // Homing
-            motor_speed_cmd = 0.1f; // Slow movement to find home
-            if (joy_is_connected() && joy_btn(BTN_LB)) {
-              current_state = STATE_EMER;
+          case STATE_HOMING_FAST:
+            mb_slave.registers[0x27] = 0x01;
+            motor_speed_cmd = -HOMING_FAST_SPEED; // direct PWM left
+            if (homing_sensor_flag) {
+              homing_sensor_flag = 0;
+              motor_speed_cmd    = 0.0f;
+              // Backoff: PID move +20° from current position
+              float back_deg = my_encoder.position_rad * (180.0f / 3.14159265f) + HOMING_BACKOFF_DEG;
+              start_move_deg(back_deg);
+              current_state = STATE_HOMING_BACKOFF;
             }
-            // Note: Exiting this state is handled by EXTI callback on HOME_Pin
+            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+            break;
+
+          case STATE_HOMING_BACKOFF: {
+            mb_slave.registers[0x27] = 0x01;
+            // PID runs via ISR (condition updated to include this state)
+            uint8_t back_done = (!g_scurve.is_active && !g_trapezoid.is_active &&
+                                  fabsf(vel_filtered) < 0.05f);
+            if (back_done) {
+              homing_exti_enable(); // re-enable EXTI for slow pass
+              current_state = STATE_HOMING_SLOW;
+            }
+            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
+            break;
+          }
+
+          case STATE_HOMING_SLOW:
+            mb_slave.registers[0x27] = 0x01;
+            motor_speed_cmd = -HOMING_SLOW_SPEED; // direct PWM very slow left
+            if (homing_sensor_flag) {
+              homing_sensor_flag = 0;
+              motor_speed_cmd    = 0.0f;
+              finish_homing();   // zeros encoder, resets cumulative, state→IDLE
+            }
+            if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
             break;
             
           case STATE_MANUAL:
             mb_slave.registers[0x27] = 0; // Idle/Manual
             if (joy_is_connected()) {
               if (joy_btn(BTN_LB)) current_state = STATE_EMER;
-              if (joy_btn(BTN_X)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
-              if (joy_btn(BTN_Y)) HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);
-              if (joy_btn(BTN_A)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Pick
-              if (joy_btn(BTN_B)) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); } // Pseudo Place
+              // X = cylinder down, Y = cylinder up, A = gripper close, B = gripper open
+              HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin,
+                                joy_btn(BTN_X) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+              if (joy_btn(BTN_A)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
+              if (joy_btn(BTN_B)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
               
               if (joy_rt_f() > 0.5f) {
                 motor_speed_cmd = joy_ly_f(); // Deadband is applied inside joy_ly_f
@@ -994,84 +1155,208 @@ int main(void)
                 if (joy_ly_f() == 0.0f) current_state = STATE_IDLE; 
               }
             } else {
-              // Check Modbus Jog
+              // Modbus Jog: signed degrees → S-curve incremental move
               int16_t jog_cmd = (int16_t)mb_slave.registers[0x05];
               if (jog_cmd != 0) {
-                // Execute jog logic here (Control team will add)
-                mb_slave.registers[0x05] = 0; // Clear command
+                float jog_rad = (float)jog_cmd * (3.14159265f / 180.0f);
+                float pos_now = my_encoder.position_rad;
+                ctrl_traj_start   = pos_now;
+                ctrl_direct_target = pos_now + jog_rad;
+                ctrl_vel_integral  = 0.0f;
+                ctrl_pos_integral  = 0.0f;
+                g_scurve.v_max = dev_dash.Auto.v_max;
+                g_scurve.a_max = dev_dash.Auto.a_max;
+                g_scurve.j_max = dev_dash.Auto.j_max;
+                SCurve_SetTarget(&g_scurve, jog_rad);
+                current_state = STATE_AUTO;
+                mb_slave.registers[0x27] = 0x08; // Go Point
+                mb_slave.registers[0x05] = 0;
               } else if ((mb_slave.registers[0x01] & 0x02) == 0) {
-                 current_state = STATE_IDLE; // Exit manual if flag cleared
+                current_state = STATE_IDLE;
               }
             }
             break;
             
           case STATE_AUTO: {
-            mb_slave.registers[0x27] = 8;
+            // ── P2P / Direct move ─────────────────────────────────────────────
+            uint8_t traj_done = (!g_scurve.is_active && !g_trapezoid.is_active &&
+                                  fabsf(my_encoder.position_rad - ctrl_direct_target)
+                                  < (2.0f * 3.14159265f / 180.0f));
 
-            // -- Trigger: Live Expressions start_move or new Modbus target --
-            static float last_mb_target = -99999.0f;
-            float mb_target_deg = (float)(int16_t)mb_slave.registers[0x24];
-            uint8_t do_move = 0;
-            float move_deg  = 0.0f;
-
-            if (dev_dash.Auto.start_move) {
-              dev_dash.Auto.start_move = 0;
-              do_move  = 1;
-              move_deg = dev_dash.Auto.target_deg;
-            } else if (mb_target_deg != last_mb_target) {
-              last_mb_target = mb_target_deg;
-              do_move  = 1;
-              move_deg = mb_target_deg;
+            // If sequence condition is now met, hand off to STATE_SEQUENCE
+            if (mb_slave.registers[0x22] > 0 && (mb_slave.registers[0x04] & 0x01)) {
+              seq_mb_state    = SEQ_MB_IDLE;
+              seq_mb_pair_idx = 0;
+              seq_mb_timer    = 0;
+              current_state   = STATE_SEQUENCE;
+              break;
             }
 
-            if (do_move) {
-              ctrl_vel_integral  = 0.0f;
-              ctrl_pos_integral  = 0.0f;
-              float target_rad   = move_deg * (3.14159f / 180.0f);
-              ctrl_direct_target = target_rad; // always set — ISR uses this when traj inactive
+            mb_slave.registers[0x27] = 0x08;
+            {
+              static float last_mb_target = -99999.0f;
+              float mb_target_deg = (float)(int16_t)mb_slave.registers[0x24];
+              if (dev_dash.Auto.start_move) {
+                dev_dash.Auto.start_move = 0;
+                start_move_deg(dev_dash.Auto.target_deg);
+              } else if (mb_target_deg != last_mb_target) {
+                last_mb_target = mb_target_deg;
+                start_move_deg(mb_target_deg);
+              }
+            }
+            if (traj_done) mb_slave.registers[0x27] = 0;
 
-              if (dev_dash.Auto.traj_type == 2) {
-                // ctrl_direct_target already set above
+            if (mb_slave.registers[0x25] & 0x01) {
+              g_scurve.is_active    = 0;
+              g_trapezoid.is_active = 0;
+              current_state = STATE_IDLE;
+              mb_slave.registers[0x25] = 0;
+              mb_slave.registers[0x27] = 0;
+            }
+            break;
+          }
+
+          case STATE_SEQUENCE: {
+            // ── Multi-step Pick/Place Sequence ────────────────────────────────
+            uint8_t traj_done = (!g_scurve.is_active && !g_trapezoid.is_active &&
+                                  fabsf(my_encoder.position_rad - ctrl_direct_target)
+                                  < (2.0f * 3.14159265f / 180.0f));
+
+            uint8_t  pairs        = (uint8_t)mb_slave.registers[0x22];
+            uint32_t seq_ticks_mb = (uint32_t)(seq_delay_s * 100.0f);
+            if (seq_ticks_mb < 1) seq_ticks_mb = 1;
+
+            switch (seq_mb_state) {
+              case SEQ_MB_IDLE:
+                seq_mb_pair_idx = 0;
+                seq_mb_state    = SEQ_MB_GOING_PICK;
+                seq_mb_timer    = 0;
+                break;
+
+              case SEQ_MB_GOING_PICK: {
+                mb_slave.registers[0x27] = 0x02;
+                float pick_deg = (float)(int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2];
+                if (seq_mb_timer == 0) start_move_deg(pick_deg);
+                seq_mb_timer = 1;
+                if (traj_done) {
+                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); // open
+                  HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);   // down
+                  seq_mb_timer = 0;
+                  seq_mb_state = SEQ_MB_PICKING;
+                }
+                break;
+              }
+
+              case SEQ_MB_PICKING:
+                seq_mb_timer++;
+                if (seq_mb_timer == seq_ticks_mb) {
+                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
+                } else if (seq_mb_timer > seq_ticks_mb) {
+                  if (reed_grip || seq_mb_timer > seq_ticks_mb * 3) {
+                    HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET); // up
+                    seq_mb_timer = 0;
+                    seq_mb_state = SEQ_MB_GOING_PLACE;
+                  }
+                }
+                break;
+
+              case SEQ_MB_GOING_PLACE: {
+                mb_slave.registers[0x27] = 0x04;
+                float place_deg = (float)(int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2 + 1];
+                if (seq_mb_timer == 0) start_move_deg(place_deg);
+                seq_mb_timer = 1;
+                if (traj_done) {
+                  HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET); // down
+                  seq_mb_timer = 0;
+                  seq_mb_state = SEQ_MB_PLACING;
+                }
+                break;
+              }
+
+              case SEQ_MB_PLACING:
+                seq_mb_timer++;
+                if (seq_mb_timer == seq_ticks_mb) {
+                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+                } else if (seq_mb_timer > seq_ticks_mb) {
+                  if (!reed_grip || seq_mb_timer > seq_ticks_mb * 3) {
+                    HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET); // up
+                    seq_mb_pair_idx++;
+                    if (seq_mb_pair_idx >= pairs) {
+                      seq_mb_state = SEQ_MB_IDLE;
+                      mb_slave.registers[0x22] = 0;
+                      mb_slave.registers[0x27] = 0;
+                      current_state = STATE_IDLE;
+                    } else {
+                      seq_mb_state = SEQ_MB_GOING_PICK;
+                      seq_mb_timer = 0;
+                    }
+                  }
+                }
+                break;
+
+              default: seq_mb_state = SEQ_MB_IDLE; break;
+            }
+
+            if (mb_slave.registers[0x25] & 0x01) {
+              g_scurve.is_active    = 0;
+              g_trapezoid.is_active = 0;
+              seq_mb_state  = SEQ_MB_IDLE;
+              HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);
+              current_state = STATE_IDLE;
+              mb_slave.registers[0x25] = 0;
+              mb_slave.registers[0x27] = 0;
+            }
+            break;
+          }
+
+          case STATE_TEST: {
+            // ── Precision / Performance Test ──────────────────────────────────
+            uint8_t traj_done = (!g_scurve.is_active && !g_trapezoid.is_active &&
+                                  fabsf(my_encoder.position_rad - ctrl_direct_target)
+                                  < (2.0f * 3.14159265f / 180.0f));
+
+            float t_start = (float)(int16_t)mb_slave.registers[0x09];
+            float t_end   = (float)(int16_t)mb_slave.registers[0x10];
+
+            if (mb_slave.registers[0x06] & 0x01) {
+              dev_dash.Auto.v_max = (float)(int16_t)mb_slave.registers[0x07] * (3.14159265f / 180.0f);
+              dev_dash.Auto.a_max = (float)(int16_t)mb_slave.registers[0x08] * (3.14159265f / 180.0f);
+            }
+
+            mb_slave.registers[0x27] = 0x08;
+            if (test_mv_armed) {
+              start_move_deg((test_state == TEST_GOING_END) ? t_end : t_start);
+              test_mv_armed = 0;
+            }
+            if (traj_done) {
+              if (test_state == TEST_GOING_END) {
+                test_state    = TEST_GOING_START;
+                test_mv_armed = 1;
               } else {
-                float pos_now     = current_position * RAD_PER_CNT;
-                ctrl_traj_start   = pos_now;
-                float disp        = target_rad - pos_now;
-
-                g_trapezoid.v_max = dev_dash.Auto.v_max;
-                g_trapezoid.a_max = dev_dash.Auto.a_max;
-                g_scurve.v_max    = dev_dash.Auto.v_max;
-                g_scurve.a_max    = dev_dash.Auto.a_max;
-                g_scurve.j_max    = dev_dash.Auto.j_max;
-
-                if (dev_dash.Auto.traj_type == 0) {
-                  if (dev_dash.Auto.time_mode == 1)
-                    Trapezoid_SetTarget_ByTime(&g_trapezoid, disp,
-                      dev_dash.Auto.t_acc_seg, dev_dash.Auto.t_cruise_seg);
-                  else
-                    Trapezoid_SetTarget(&g_trapezoid, disp);
+                if (test_repeat > 0) test_repeat--;
+                if (test_repeat == 0) {
+                  test_state    = TEST_IDLE;
+                  mb_slave.registers[0x27] = 0;
+                  current_state = STATE_IDLE;
                 } else {
-                  if (dev_dash.Auto.time_mode == 1)
-                    SCurve_SetTarget_ByTime(&g_scurve, disp,
-                      dev_dash.Auto.t1_seg, dev_dash.Auto.t2_seg, dev_dash.Auto.t_cruise_seg);
-                  else
-                    SCurve_SetTarget(&g_scurve, disp);
+                  test_state    = TEST_GOING_END;
+                  test_mv_armed = 1;
                 }
               }
             }
 
-            // PID + trajectory update runs in TIM7 ISR @1kHz
-            // Dashboard status (pos_rad, vel_rad_s, pos_err, etc.) updated there too
-
-            // -- Abort --
-
-            // Disabled Joystick LB Abort in AUTO to prevent floating USART3 EMI noise from triggering random EMER.
             if (mb_slave.registers[0x25] & 0x01) {
+              g_scurve.is_active    = 0;
+              g_trapezoid.is_active = 0;
+              test_state    = TEST_IDLE;
+              test_mv_armed = 0;
               current_state = STATE_IDLE;
               mb_slave.registers[0x25] = 0;
+              mb_slave.registers[0x27] = 0;
             }
             break;
           }
-            
+
           case STATE_EMER:
             break; // handled by common emer_active block above
             
@@ -1080,12 +1365,32 @@ int main(void)
             break;
         }
         
-        // Apply Modbus Relay Control (if not controlled by Joystick)
+        // Modbus Actuator Control (BaseSystem register map)
         if (!joy_is_connected()) {
-          HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, (mb_slave.registers[0x03] & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, (mb_slave.registers[0x03] & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, (mb_slave.registers[0x03] & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, (mb_slave.registers[0x03] & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          // 0x02: Manual gripper — only when sequence is idle (avoid fighting automation)
+          if (seq_mb_state == SEQ_MB_IDLE) {
+            uint16_t grip_cmd = mb_slave.registers[0x02];
+            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin,
+                              (grip_cmd & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+            if      (grip_cmd & 0x02) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+            else if (grip_cmd & 0x04) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
+          }
+
+          // 0x03: Sequence trigger — bit0=Pick, bit1=Place (edge-triggered, auto-clear)
+          static uint16_t seq3_prev = 0;
+          uint16_t seq3 = mb_slave.registers[0x03];
+          if ((seq3 & 0x01) && !(seq3_prev & 0x01)) {
+            // Trigger Pick via Modbus: open gripper → down → grip → up
+            HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); // open first
+            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  // down
+            mb_slave.registers[0x27] |= 0x02; // task = Pick
+          }
+          if ((seq3 & 0x02) && !(seq3_prev & 0x02)) {
+            // Trigger Place via Modbus: down → release → up
+            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  // down
+            mb_slave.registers[0x27] |= 0x04; // task = Place
+          }
+          seq3_prev = seq3;
         }
         
         // Apply Motor Command — STATE_AUTO handles its own PWM in TIM7 ISR
@@ -1120,19 +1425,85 @@ int main(void)
       } // End Normal Production Mode
       } // End !emer_active
 
-      // SET HOME LED feedback: เหลือง-เหลือง-เขียว (ทุกโหมด)
-      if (sethome_led_cnt > 0 && !emer_active) {
-        uint8_t c = sethome_led_cnt;
-        if      (c <= 20)  { HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, GPIO_PIN_SET);
-                            HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, GPIO_PIN_RESET); }
-        else if (c <= 40)  { HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, GPIO_PIN_RESET); }
-        else if (c <= 60)  { HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, GPIO_PIN_SET); }
-        else if (c <= 80)  { HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, GPIO_PIN_RESET); }
-        else if (c <= 130) { HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, GPIO_PIN_SET);
-                            HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, GPIO_PIN_RESET); }
-        else              { HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, GPIO_PIN_RESET);
-                            sethome_led_cnt = 0; }
-        if (sethome_led_cnt > 0) sethome_led_cnt++;
+      // ── Tower Light State Machine (industrial-style, 100Hz tick) ───────────
+      // Drives G/Y/R based on system state. Non-test modes only.
+      // Test modes (HW_TEST, JOY_TEST, AUTO_MOTOR) manage their own lights above.
+      if (dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+        static uint8_t tl_tick = 0;
+        tl_tick++;
+
+        uint8_t G = 0, Y = 0, R = 0; // desired state this tick
+
+        if (emer_active) {
+          uint8_t estop_released = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET);
+          if (estop_released) {
+            // ESTOP released — waiting for RESET: all 3 lights blink 2Hz together = "press RESET"
+            uint8_t ph = (tl_tick % 50) < 25 ? 1 : 0;
+            G = ph; Y = ph; R = ph;
+          } else {
+            // ESTOP still held: Red solid + Yellow 1Hz blink
+            R = 1;
+            Y = (tl_tick % 100) < 50 ? 1 : 0;
+          }
+
+        } else if (current_state == STATE_HOMING_FAST) {
+          // Fast sweep: Yellow fast blink (5Hz)
+          Y = (tl_tick % 20) < 10 ? 1 : 0;
+
+        } else if (current_state == STATE_HOMING_BACKOFF) {
+          // Backoff: Yellow + Green alternate (2Hz)
+          uint8_t phase = (tl_tick % 50) < 25;
+          Y = phase; G = !phase;
+
+        } else if (current_state == STATE_HOMING_SLOW) {
+          // Slow approach: Yellow single pulse 1Hz (brief flash)
+          Y = (tl_tick % 100) < 8 ? 1 : 0;
+
+        } else if (!homed) {
+          // Not yet homed: Yellow steady — needs homing
+          Y = 1;
+
+        } else if (current_state == STATE_IDLE) {
+          // Idle + homed: Green steady
+          G = 1;
+          // Set Home flash override: Y-Y-G sequence
+          if (sethome_led_cnt > 0) {
+            uint8_t c = sethome_led_cnt;
+            G = (c > 80 && c <= 130) ? 1 : 0;
+            Y = (c <= 20 || (c > 40 && c <= 60)) ? 1 : 0;
+            if (++sethome_led_cnt > 130) sethome_led_cnt = 0;
+          }
+
+        } else if (current_state == STATE_MANUAL) {
+          // Manual: Green + Yellow steady
+          G = 1; Y = 1;
+
+        } else if (current_state == STATE_AUTO) {
+          // P2P: Green steady when settled, 4Hz blink when moving
+          uint8_t moving = (g_scurve.is_active || g_trapezoid.is_active ||
+                            fabsf(vel_filtered) > 0.05f);
+          G = moving ? ((tl_tick % 12) < 6 ? 1 : 0) : 1;
+
+        } else if (current_state == STATE_SEQUENCE) {
+          // Sequence: Green + Yellow blink 2Hz in phase — distinctive double-blink
+          uint8_t ph = (tl_tick % 50) < 25 ? 1 : 0;
+          G = ph; Y = ph;
+
+        } else if (current_state == STATE_TEST) {
+          // Test: Green steady + Yellow 2Hz blink
+          G = 1;
+          Y = (tl_tick % 50) < 25 ? 1 : 0;
+        }
+
+        // Near-limit warning overlay: Red brief flash when within 100° of ±540° soft limit
+        // Runs on top of any non-EMER state
+        if (!emer_active && homed && (fabsf(cumulative_angle_deg) > 440.0f)) {
+          R = (tl_tick % 20) < 3 ? 1 : 0; // brief 5Hz flash — noticeable but not distracting
+        }
+
+        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, G ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, Y ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, R ? GPIO_PIN_SET : GPIO_PIN_RESET);
       }
 
       // 7. Update Live Expressions Dashboard
@@ -1175,7 +1546,7 @@ int main(void)
 
       // Send telemetry @ 50Hz (ทุก 2 รอบ) — 19200 baud/16 bytes ≈ 9ms ต้องการ gap ≥ 20ms
       static uint8_t telem_div = 0;
-      if (++telem_div >= 2) { telem_div = 0; Send_Telemetry(); }
+      if (enable_telemetry && ++telem_div >= 2) { telem_div = 0; Send_Telemetry(); }
 
       // Refresh IWDG
       HAL_IWDG_Refresh(&hiwdg);
@@ -1684,12 +2055,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : ESTOP_Pin */
-  GPIO_InitStruct.Pin = ESTOP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(ESTOP_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pins : MOTOR_DIR_Pin LD2_Pin */
   GPIO_InitStruct.Pin = MOTOR_DIR_Pin|LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -1709,11 +2074,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(REED_GRIP_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : POWER_BTN_Pin */
-  GPIO_InitStruct.Pin = POWER_BTN_Pin;
+  /*Configure GPIO pins : POWER_BTN_Pin ESTOP_Pin HOME_SENSOR_Pin */
+  GPIO_InitStruct.Pin = POWER_BTN_Pin|ESTOP_Pin|HOME_SENSOR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(POWER_BTN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : GRIPPER_Pin EMER_OUTPUT_Pin RESET_LED_Pin TOWER_Y_Pin */
   GPIO_InitStruct.Pin = GRIPPER_Pin|EMER_OUTPUT_Pin|RESET_LED_Pin|TOWER_Y_Pin;
@@ -1733,37 +2098,11 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+  /* (EXTI2 removed — ESTOP moved from PC2 → PB13, now polled in 100Hz loop) */
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
-// ── UART4 Init (PB9=TX AF8, PB8=RX AF8) ──────────────────────────────────────
-static void UART4_Init(void)
-{
-  __HAL_RCC_UART4_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  GPIO_InitTypeDef g = {0};
-  g.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
-  g.Mode      = GPIO_MODE_AF_PP;
-  g.Pull      = GPIO_NOPULL;
-  g.Speed     = GPIO_SPEED_FREQ_HIGH;
-  g.Alternate = GPIO_AF8_UART4;
-  HAL_GPIO_Init(GPIOB, &g);
-
-  huart4.Instance          = UART4;
-  huart4.Init.BaudRate     = 115200;
-  huart4.Init.WordLength   = UART_WORDLENGTH_8B;
-  huart4.Init.StopBits     = UART_STOPBITS_1;
-  huart4.Init.Parity       = UART_PARITY_NONE;
-  huart4.Init.Mode         = UART_MODE_TX_RX;
-  huart4.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
-  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
-  HAL_UART_Init(&huart4);
-}
 
 // ── Telemetry Packet ─────────────────────────────────────────────────────────
 // Format (24 bytes):
@@ -1790,14 +2129,22 @@ static void Send_Telemetry(void)
   buf[22] = 0x03;
   buf[23] = 0x03;
 
-  // Single-Cable Multiplexed Mode via ST-Link (LPUART1 115200 8N1)
-  // 24 bytes @ 115200 = ~2.1ms — timeout 5ms ปลอดภัย
-  HAL_UART_Transmit(&hlpuart1, buf, sizeof(buf), 5);
+  // LPUART1 19200 8E1 — 24 bytes = ~13.7ms, timeout 20ms
+  HAL_UART_Transmit(&hlpuart1, buf, sizeof(buf), 20);
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  // ESTOP is now safely polled in the 100Hz loop to prevent EMI phantom triggers and ISR hangs.
+  // ESTOP: polled in 100Hz loop (not interrupt-based, anti-EMI)
+
+  if (GPIO_Pin == HOME_SENSOR_Pin) {
+    // Only act during homing states
+    if (current_state != STATE_HOMING_FAST && current_state != STATE_HOMING_SLOW) return;
+    // Debounce: set pending flag, 1kHz ISR will validate after 1ms
+    homing_sensor_pending = 1;
+    // Disable EXTI immediately to prevent re-trigger during debounce window
+    __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
+  }
 }
 /* USER CODE END 4 */
 
@@ -1828,6 +2175,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       Encoder_Init(&my_encoder, LOOP_DT);
       my_encoder.last_counter_value = enc_now;
       current_position = 0;
+      // cumulative_angle_deg is reset only by finish_homing(), not by set_home
     }
 
     // Direction-negated windowed velocity (hardware counts down when moving forward)
@@ -1848,6 +2196,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       } else {
         my_encoder.velocity_rad_s = (float)delta * COUNTS_TO_RAD / LOOP_DT;
       }
+      // Track cumulative rotation from home (only after homed)
+      if (homed && !enc_reset_pending) {
+        cumulative_angle_deg += (float)delta * COUNTS_TO_RAD * (180.0f / 3.14159265f);
+      }
+    }
+
+    // Homing sensor debounce: validate 1ms after EXTI fires
+    if (homing_sensor_pending) {
+      homing_sensor_pending = 0;
+      if (HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin) == HOME_SENSOR_ACTIVE) {
+        homing_sensor_flag = 1; // confirmed, not a glitch
+      }
     }
 
     // IIR velocity filter (reduces quantization noise beyond windowing)
@@ -1864,7 +2224,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     ctrl_acc_rad_s2 = ctrl_acc_rad_s2 * (1.0f - vel_alpha) + raw_acc * vel_alpha;
 
     // ── AUTO CONTROL @ 1kHz ──────────────────────────────────────────────────
-    if (current_state == STATE_AUTO && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+    if ((current_state == STATE_AUTO     || current_state == STATE_SEQUENCE ||
+         current_state == STATE_TEST     || current_state == STATE_HOMING_BACKOFF)
+        && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
 
       // Trajectory reference
       float ideal_pos, ideal_vel, ideal_acc;
@@ -1981,7 +2343,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     // Safety: ถ้าเพิ่งออกจาก STATE_AUTO → force PWM=0 ทันทีใน ISR tick ถัดไป
     {
       static uint8_t isr_was_auto = 0;
-      if (current_state == STATE_AUTO) {
+      if (current_state == STATE_AUTO || current_state == STATE_SEQUENCE || current_state == STATE_TEST) {
         isr_was_auto = 1;
       } else if (isr_was_auto) {
         isr_was_auto = 0;

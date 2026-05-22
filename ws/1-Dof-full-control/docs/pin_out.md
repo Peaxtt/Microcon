@@ -125,14 +125,69 @@
 
 ---
 
-## IOC Change Checklist (do before next build)
+## IOC Change Checklist
 
-- [ ] **PA1** REED_UP: `GPIO_PULLUP` → `GPIO_PULLDOWN`
-- [ ] **PA4** REED_DOWN: `GPIO_PULLUP` → `GPIO_PULLDOWN`
-- [ ] **PB0** REED_GRIP: `GPIO_PULLUP` → `GPIO_PULLDOWN`
-- [ ] **FDCAN1**: Add peripheral, assign PA11/PA12, configure 1Mbit/s
-- [ ] **UART4**: Add peripheral, assign PB8/PB9, configure 115200 8N1
-- [ ] After code-gen: uncomment `extern hfdcan1` and `extern huart4` in `main.c`
+- [x] **PA1** REED_UP: PULLDOWN ✓
+- [x] **PA4** REED_DOWN: PULLDOWN ✓
+- [x] **PB0** REED_GRIP: PULLDOWN ✓
+- [x] **FDCAN1**: PA11/PA12, 1Mbit/s ✓
+- [x] **ESTOP**: PB13, PULLUP, INPUT ✓
+- [ ] **FDCAN1 SJW**: change 1 → 2 in IOC then regen
+
+---
+
+## Modbus Register Map (Slave ID=21, 19200 8E1)
+
+### BaseSystem Writes (PC → Robot)
+
+| Addr | Dec | Name | Encoding |
+|------|-----|------|----------|
+| 0x00 | 0 | Heartbeat reply | PC writes 18537 "HI" in response to robot 22881 "YA" |
+| 0x01 | 1 | Mode | 1=Home, 2=Jog/Manual, 4=Auto, 8=SetHome, 16=Test |
+| 0x02 | 2 | Gripper manual | bit0=Down(POWER_LATCH), bit1=Open(GRIPPER), bit2=Close(GRIPPER) |
+| 0x03 | 3 | Sequence trigger | bit0=Pick, bit1=Place (edge-triggered, auto-clear) |
+| 0x04 | 4 | Gripper enable | bit0: enable gripper during AUTO |
+| 0x05 | 5 | Jog | signed int16, degrees (+CCW / −CW) |
+| 0x06 | 6 | Test type | 0=Precision, 1=Performance |
+| 0x07 | 7 | Perf speed | signed int16 |
+| 0x08 | 8 | Perf accel | signed int16 |
+| 0x09 | 9 | Prec start | signed int16, degrees |
+| 0x10 | 16 | Prec end | signed int16, degrees |
+| 0x11 | 17 | Prec repeats | signed int16 |
+| 0x12–0x21 | 18–33 | Seq slots ×10 | signed int16, hole index + direction |
+| 0x22 | 34 | Pair count | uint16 |
+| 0x23 | 35 | P2P unit | 0=degree, 1=index |
+| 0x24 | 36 | P2P target | signed int16 |
+| 0x25 | 37 | Soft stop | bit0: 1=stop |
+
+### Robot Reads (Robot → PC)
+
+| Addr | Dec | Name | Encoding |
+|------|-----|------|----------|
+| 0x00 | 0 | Heartbeat | robot writes 22881 "YA" |
+| 0x26 | 38 | Reed sensors | bit0=Up, bit1=Down, bit2=Grip (1=triggered) |
+| 0x27 | 39 | Task state | bit0=Homing, bit1=Pick, bit2=Place, bit3=Point, 0=Idle |
+| 0x28 | 40 | Position | signed int16, degrees × 10 |
+| 0x29 | 41 | Velocity | signed int16, deg/s × 10 |
+| 0x30 | 42 | Acceleration | signed int16, deg/s² × 10 |
+| 0x31 | 43 | Emergency | 1=active |
+
+### Custom Tuning Registers (Python GUI / Live Expression)
+
+| Addr | Dec | Name | Encoding |
+|------|-----|------|----------|
+| 0x0C | 12 | kp_vel ×100 | uint16 |
+| 0x0D | 13 | ki_vel ×100 | uint16 |
+| 0x0E | 14 | kd_vel ×100 | uint16 |
+| 0x0F | 15 | Apply trigger | write 1 to apply |
+| 0x38 | 56 | Traj type | 0=SCurve, 1=Trapezoid |
+| 0x39 | 57 | v_max ×100 | uint16 |
+| 0x3A | 58 | Current sensor | mA (read only) |
+| 0x3B | 59 | a_max ×100 | uint16 |
+| 0x3C | 60 | j_max ×100 | uint16 |
+| 0x3D | 61 | kp_pos ×100 | uint16 |
+| 0x3E | 62 | kd_pos ×100 | uint16 |
+| 0x3F | 63 | ki_pos ×100 | uint16 |
 
 ---
 

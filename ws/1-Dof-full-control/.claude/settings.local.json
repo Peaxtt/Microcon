@@ -13,7 +13,8 @@
       "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Inc\\\\ENCODER.h\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\ENCODER.h\")",
       "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\SCURVE.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\SCURVE.c\")",
       "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Inc\\\\SCURVE.h\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Inc\\\\SCURVE.h\")",
-      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\TRAPEZOID.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\TRAPEZOID.c\")"
+      "Bash(cp \"C:\\\\PaYae\\\\Control_by_due\\\\Control\\\\Controller\\\\Auto_Control\\\\Core\\\\Src\\\\TRAPEZOID.c\" \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\Core\\\\Src\\\\TRAPEZOID.c\")",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\PaYae\\\\Studio\\\\FRA263-264_BaseSystem\" -Recurse -Directory | ForEach-Object { $_.FullName })"
     ]
   }
 }

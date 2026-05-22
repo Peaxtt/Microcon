@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1-DOF Robot — Setup & Operation Guide</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2d3148;
+    --accent: #4f8ef7;
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --red: #e74c3c;
+    --text: #d4d8e8;
+    --muted: #7a8099;
+    --code-bg: #0d1020;
+    --phase1: #1a2744;
+    --phase2: #1a2a1a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px; line-height: 1.65; }
+
+  /* Layout */
+  .page-header { background: linear-gradient(135deg, #1a1d3a 0%, #0f1117 100%); border-bottom: 2px solid var(--accent); padding: 32px 48px; }
+  .page-header h1 { font-size: 28px; color: #fff; letter-spacing: 0.5px; }
+  .page-header .subtitle { color: var(--muted); margin-top: 6px; font-size: 14px; }
+  .phase-selector { display: flex; gap: 12px; margin-top: 20px; }
+  .phase-btn { padding: 8px 24px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+  .phase-btn.active { color: #fff; border-color: var(--accent); background: rgba(79,142,247,0.15); }
+  .phase-btn:hover:not(.active) { border-color: #555; color: var(--text); }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 48px 64px; }
+
+  /* Phase panels */
+  .phase-panel { display: none; }
+  .phase-panel.active { display: block; }
+
+  /* Phase badge */
+  .phase-badge { display: inline-flex; align-items: center; gap: 8px; padding: 4px 14px; border-radius: 20px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 24px; }
+  .badge-p1 { background: rgba(79,142,247,0.15); color: var(--accent); border: 1px solid rgba(79,142,247,0.4); }
+  .badge-p2 { background: rgba(46,204,113,0.12); color: var(--green); border: 1px solid rgba(46,204,113,0.35); }
+
+  /* Section */
+  .section { margin-bottom: 40px; }
+  .section h2 { font-size: 19px; color: #fff; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+  .section h3 { font-size: 15px; font-weight: 700; color: var(--accent); margin: 20px 0 10px; }
+  .section p { margin-bottom: 10px; color: var(--text); }
+
+  /* Cards */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .card h4 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 10px; }
+  .card .value { font-size: 15px; color: var(--text); }
+  .card .value span { color: var(--accent); font-family: monospace; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin-bottom: 16px; }
+  th { background: #12152a; color: var(--accent); font-weight: 600; padding: 10px 14px; text-align: left; border-bottom: 2px solid var(--border); }
+  td { padding: 9px 14px; border-bottom: 1px solid rgba(45,49,72,0.6); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(79,142,247,0.04); }
+  .pin { font-family: monospace; color: #a78bfa; font-size: 13px; }
+  .fn { color: var(--text); }
+  .cfg { color: var(--muted); font-size: 12px; }
+  .hi { color: var(--green); }
+  .lo { color: var(--red); }
+  .warn { color: var(--yellow); }
+
+  /* Code blocks */
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 13px; line-height: 1.7; overflow-x: auto; margin-bottom: 16px; color: #c9d1d9; }
+  pre .kw { color: #ff7b72; }
+  pre .str { color: #a5d6ff; }
+  pre .cmt { color: #6a737d; }
+  pre .num { color: #79c0ff; }
+  pre .fn  { color: #d2a8ff; }
+
+  /* Step list */
+  .steps { counter-reset: step; list-style: none; padding: 0; }
+  .steps li { counter-increment: step; display: flex; gap: 16px; margin-bottom: 16px; }
+  .steps li::before { content: counter(step); flex-shrink: 0; width: 28px; height: 28px; background: rgba(79,142,247,0.15); color: var(--accent); border: 1.5px solid rgba(79,142,247,0.4); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; margin-top: 2px; }
+  .steps li .step-body h4 { font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .steps li .step-body p { color: var(--muted); font-size: 14px; }
+
+  /* State machine */
+  .sm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .sm-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .sm-card .state { font-family: monospace; font-size: 13px; color: var(--accent); font-weight: 700; margin-bottom: 6px; }
+  .sm-card .desc { font-size: 13px; color: var(--muted); }
+  .sm-card .lights { display: flex; gap: 6px; margin-top: 8px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .dot-g { background: var(--green); } .dot-y { background: var(--yellow); } .dot-r { background: var(--red); }
+  .dot-off { background: #2d3148; }
+  .dot-blink { animation: blink 0.5s infinite; }
+  .dot-slow  { animation: blink 1s infinite; }
+  .dot-warn  { animation: warn 0.2s infinite; }
+  @keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0.2} }
+  @keyframes warn  { 0%,14%{opacity:1} 15%,100%{opacity:0.1} }
+
+  /* Tower light legend */
+  .tower-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(45,49,72,0.5); }
+  .tower-row:last-child { border-bottom: none; }
+  .tower-lights { display: flex; gap: 6px; min-width: 60px; }
+  .tower-label { font-size: 13.5px; color: var(--text); flex: 1; }
+  .tower-sub { font-size: 12px; color: var(--muted); }
+
+  /* Alert boxes */
+  .alert { border-radius: 8px; padding: 14px 18px; margin-bottom: 16px; font-size: 14px; display: flex; gap: 10px; align-items: flex-start; }
+  .alert-warn { background: rgba(241,196,15,0.08); border: 1px solid rgba(241,196,15,0.3); color: #f1c40f; }
+  .alert-info { background: rgba(79,142,247,0.08); border: 1px solid rgba(79,142,247,0.3); color: var(--accent); }
+  .alert-ok   { background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.3); color: var(--green); }
+  .alert-icon { font-size: 16px; }
+  .alert-text { color: var(--text); }
+  .alert-text strong { color: inherit; }
+
+  /* Register table highlight */
+  .reg-rw { color: var(--accent); font-size: 12px; font-weight: 700; }
+  .reg-ro { color: var(--muted); font-size: 12px; font-weight: 700; }
+  .addr { font-family: monospace; color: #a78bfa; }
+
+  /* Diff badge */
+  .new-pcb { display: inline-block; background: rgba(46,204,113,0.15); color: var(--green); border: 1px solid rgba(46,204,113,0.3); border-radius: 4px; padding: 1px 7px; font-size: 11px; font-weight: 700; margin-left: 6px; }
+
+  /* TOC */
+  .toc { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin-bottom: 32px; }
+  .toc h3 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; }
+  .toc ul { list-style: none; columns: 2; column-gap: 24px; }
+  .toc ul li { margin-bottom: 6px; }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 14px; }
+  .toc a:hover { text-decoration: underline; }
+
+  hr.divider { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>🤖 1-DOF Robot Control System</h1>
+  <div class="subtitle">STM32G474RETx — Setup &amp; Operation Guide &nbsp;|&nbsp; Last updated: 2026-05-22</div>
+  <div class="phase-selector">
+    <button class="phase-btn active" onclick="showPhase(1)">Phase 1 — NUCLEO (ปัจจุบัน)</button>
+    <button class="phase-btn" onclick="showPhase(2)">Phase 2 — Custom PCB (หลัง fabricate)</button>
+  </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════════════════════╗ -->
+<!-- ║  PHASE 1                                                               ║ -->
+<!-- ╚══════════════════════════════════════════════════════════════════════════╝ -->
+<div class="container">
+<div id="phase1" class="phase-panel active">
+
+  <div class="phase-badge badge-p1">Phase 1 — NUCLEO-G474RE (Development Board)</div>
+
+  <div class="toc">
+    <h3>สารบัญ</h3>
+    <ul>
+      <li><a href="#p1-hw">1. Hardware Setup</a></li>
+      <li><a href="#p1-pins">2. Pin Assignments</a></li>
+      <li><a href="#p1-ioc">3. IOC / CubeMX Config</a></li>
+      <li><a href="#p1-flash">4. Flash &amp; First Boot</a></li>
+      <li><a href="#p1-homing">5. Homing Procedure</a></li>
+      <li><a href="#p1-sm">6. State Machine</a></li>
+      <li><a href="#p1-lights">7. Tower Lights</a></li>
+      <li><a href="#p1-modbus">8. Modbus Register Map</a></li>
+      <li><a href="#p1-joystick">9. Joystick Controls</a></li>
+      <li><a href="#p1-pid">10. PID Tuning</a></li>
+      <li><a href="#p1-debug">11. Debug / Live Expressions</a></li>
+    </ul>
+  </div>
+
+  <!-- 1. HARDWARE SETUP -->
+  <div class="section" id="p1-hw">
+    <h2>🔌 1. Hardware Setup</h2>
+    <div class="card-grid">
+      <div class="card">
+        <h4>MCU Board</h4>
+        <div class="value">NUCLEO-G474RE<br><span>STM32G474RETx @ 170 MHz</span></div>
+      </div>
+      <div class="card">
+        <h4>Motor Driver</h4>
+        <div class="value">Cytron MDD3A<br><span>DIR=PA0, PWM=PA6</span></div>
+      </div>
+      <div class="card">
+        <h4>Encoder</h4>
+        <div class="value">Quadrature<br><span>8192 counts/rev — TIM1 TI12<br>ENC_A=PA8, ENC_B=PA9</span></div>
+      </div>
+      <div class="card">
+        <h4>Joystick</h4>
+        <div class="value">Xbox → RP2040-Zero<br><span>USART3, 460800 8N1<br>PC10(TX)/PC11(RX)</span></div>
+      </div>
+      <div class="card">
+        <h4>PC Interface</h4>
+        <div class="value">Modbus RTU FC06<br><span>LPUART1, 19200 8E1<br>Slave ID = 21</span></div>
+      </div>
+      <div class="card">
+        <h4>CAN Bus</h4>
+        <div class="value">TJA1050 transceiver<br><span>FDCAN1 @ 1 Mbit/s<br>PA11(RX)/PA12(TX)</span></div>
+      </div>
+    </div>
+
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text"><strong>Reed Switch Wiring:</strong> ใช้ NC contact, COM → 3V3, GPIO → Pull-DOWN.
+        ปกติ (ไม่มีแม่เหล็ก) = HIGH. ตรวจพบ (มีแม่เหล็ก) = LOW → <code>reed_x = 1</code></div>
+    </div>
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text"><strong>HOME_SENSOR:</strong> PNP proximity → Opto-isolator → PB6.
+        Active HIGH (GPIO_PIN_SET = detected). EXTI rising edge. เปิดเฉพาะตอน homing เท่านั้น.</div>
+    </div>
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text"><strong>ESTOP (PB13):</strong> Active LOW. PULLUP. ต้องกดค้างพร้อม RESET_BTN จึงจะออกจาก STATE_EMER ได้.</div>
+    </div>
+  </div>
+
+  <!-- 2. PIN ASSIGNMENTS -->
+  <div class="section" id="p1-pins">
+    <h2>📍 2. Pin Assignments</h2>
+
+    <h3>Motor &amp; Encoder</h3>
+    <table>
+      <tr><th>Pin</th><th>Label</th><th>Direction</th><th>Config</th><th>Function</th></tr>
+      <tr><td class="pin">PA0</td><td>MOTOR_DIR</td><td>Output</td><td class="cfg">Push-Pull</td><td>Direction (Cytron DIR)</td></tr>
+      <tr><td class="pin">PA6</td><td>PWM</td><td>Output</td><td class="cfg">TIM3 CH1, AF2</td><td>20 kHz motor PWM (period=8499)</td></tr>
+      <tr><td class="pin">PA8</td><td>ENC_A</td><td>Input</td><td class="cfg">TIM1 CH1, AF6</td><td>Encoder channel A</td></tr>
+      <tr><td class="pin">PA9</td><td>ENC_B</td><td>Input</td><td class="cfg">TIM1 CH2, AF6</td><td>Encoder channel B</td></tr>
+    </table>
+
+    <h3>Sensors &amp; Safety</h3>
+    <table>
+      <tr><th>Pin</th><th>Label</th><th>Config</th><th>Active</th><th>Function</th></tr>
+      <tr><td class="pin">PB6</td><td>HOME_SENSOR</td><td class="cfg">PULLDOWN, EXTI rising</td><td class="hi">HIGH</td><td>Proximity sensor (homing)</td></tr>
+      <tr><td class="pin">PA1</td><td>REED_UP</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Cylinder UP end-stop</td></tr>
+      <tr><td class="pin">PA4</td><td>REED_DOWN</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Cylinder DOWN end-stop</td></tr>
+      <tr><td class="pin">PB0</td><td>REED_GRIP</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Gripper CLOSED sensor</td></tr>
+      <tr><td class="pin">PB13</td><td>ESTOP</td><td class="cfg">PULLUP, polled</td><td class="lo">LOW</td><td>Emergency stop input</td></tr>
+      <tr><td class="pin">PC13</td><td>RESET_BTN</td><td class="cfg">PULLUP</td><td class="lo">LOW</td><td>Reset / clear EMER</td></tr>
+      <tr><td class="pin">PB10</td><td>POWER_BTN</td><td class="cfg">PULLUP, polled 1kHz</td><td class="lo">LOW</td><td>Hold 3s → power off</td></tr>
+      <tr><td class="pin">PB5</td><td>MODE</td><td class="cfg">PULLUP, EXTI both-edge</td><td class="lo">LOW=AUTO</td><td>Hardware mode selector</td></tr>
+    </table>
+
+    <h3>Actuators &amp; Indicators</h3>
+    <table>
+      <tr><th>Pin</th><th>Label</th><th>Function</th></tr>
+      <tr><td class="pin">PC1</td><td>POWER_LATCH</td><td>Pneumatic cylinder DOWN solenoid</td></tr>
+      <tr><td class="pin">PB11</td><td>GRIPPER</td><td>Gripper close solenoid (SET=close)</td></tr>
+      <tr><td class="pin">PC6</td><td>PNEUMATIC</td><td>Auxiliary pneumatic solenoid</td></tr>
+      <tr><td class="pin">PC7</td><td>TOWER_G</td><td>Tower light — Green</td></tr>
+      <tr><td class="pin">PB7</td><td>TOWER_Y</td><td>Tower light — Yellow</td></tr>
+      <tr><td class="pin">PC8</td><td>TOWER_R</td><td>Tower light — Red</td></tr>
+      <tr><td class="pin">PB14</td><td>EMER_OUTPUT</td><td>E-Stop output relay (to external safety)</td></tr>
+      <tr><td class="pin">PB4</td><td>RESET_LED</td><td>Reset LED indicator (SET in EMER)</td></tr>
+      <tr><td class="pin">PA5</td><td>LD2</td><td>Heartbeat LED (blink 1Hz = alive)</td></tr>
+    </table>
+
+    <h3>Communication</h3>
+    <table>
+      <tr><th>Pin</th><th>Peripheral</th><th>Config</th><th>Function</th></tr>
+      <tr><td class="pin">PA2</td><td>LPUART1_TX</td><td class="cfg">19200 8E1</td><td>Modbus RTU → PC</td></tr>
+      <tr><td class="pin">PA3</td><td>LPUART1_RX</td><td class="cfg">19200 8E1</td><td>Modbus RTU ← PC</td></tr>
+      <tr><td class="pin">PC10</td><td>USART3_TX</td><td class="cfg">460800 8N1, DMA</td><td>→ RP2040 (joystick bridge TX)</td></tr>
+      <tr><td class="pin">PC11</td><td>USART3_RX</td><td class="cfg">460800 8N1, DMA</td><td>← RP2040 (joystick bridge RX)</td></tr>
+      <tr><td class="pin">PA11</td><td>FDCAN1_RX</td><td class="cfg">AF9</td><td>CAN Bus receive</td></tr>
+      <tr><td class="pin">PA12</td><td>FDCAN1_TX</td><td class="cfg">AF9</td><td>CAN Bus transmit</td></tr>
+      <tr><td class="pin">PC4</td><td>ADC2_IN5</td><td class="cfg">12-bit, single-ended</td><td>Current sensor (WCS1800)</td></tr>
+    </table>
+  </div>
+
+  <!-- 3. IOC CONFIG -->
+  <div class="section" id="p1-ioc">
+    <h2>⚙️ 3. IOC / CubeMX Config Checklist</h2>
+    <table>
+      <tr><th>Item</th><th>Setting</th><th>Status</th></tr>
+      <tr><td>PA1 REED_UP</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
+      <tr><td>PA4 REED_DOWN</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
+      <tr><td>PB0 REED_GRIP</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
+      <tr><td>PB6 HOME_SENSOR</td><td>GPIO_INPUT, <strong>PULLDOWN</strong> (EXTI enabled in code only during homing)</td><td class="hi">✓ done</td></tr>
+      <tr><td>PB13 ESTOP</td><td>GPIO_INPUT, <strong>PULLUP</strong></td><td class="hi">✓ done</td></tr>
+      <tr><td>TIM1</td><td>Encoder TI12 mode, PA8/PA9, period=65535</td><td class="hi">✓ done</td></tr>
+      <tr><td>TIM3 CH1</td><td>PWM, PA6, period=8499, prescaler=0 → 20 kHz</td><td class="hi">✓ done</td></tr>
+      <tr><td>TIM7</td><td>1 kHz interrupt (period=169999, prescaler=0)</td><td class="hi">✓ done</td></tr>
+      <tr><td>LPUART1</td><td><strong>19200 baud, 8E1</strong>, DMA RX+TX</td><td class="hi">✓ done</td></tr>
+      <tr><td>USART3</td><td>460800, 8N1, DMA RX</td><td class="hi">✓ done</td></tr>
+      <tr><td>FDCAN1</td><td>PA11/PA12, Prescaler=5, Seg1=25, Seg2=8, SJW=1, Classic CAN</td><td class="hi">✓ done</td></tr>
+      <tr><td>ADC2 CH5</td><td>PC4, single-ended, 12-bit, software trigger</td><td class="hi">✓ done</td></tr>
+      <tr><td>IWDG</td><td>Prescaler=32, Reload=4095 → ~3.2s timeout</td><td class="hi">✓ done</td></tr>
+      <tr><td>EXTI9_5 priority</td><td>0 (highest) — covers PB5 MODE + PB6 HOME_SENSOR</td><td class="hi">✓ done</td></tr>
+    </table>
+  </div>
+
+  <!-- 4. FLASH & FIRST BOOT -->
+  <div class="section" id="p1-flash">
+    <h2>🚀 4. Flash &amp; First Boot</h2>
+    <ol class="steps">
+      <li>
+        <div class="step-body">
+          <h4>Build &amp; Flash</h4>
+          <p>STM32CubeIDE → Build All → Run As → STM32 MCU C/C++ Application. LD2 บน NUCLEO จะกะพริบ 1 Hz = firmware ทำงาน.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Connect PC (Modbus)</h4>
+          <p>USB-A (ST-Link on NUCLEO) → PC หรือต่อผ่าน CH340 บน PCB.<br>
+          Port: COM&lt;x&gt;, 19200 baud, 8E1, Slave ID=21</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Connect Joystick</h4>
+          <p>Xbox controller → USB-A → RP2040-Zero (USB-C). RP2040 ส่งข้อมูลผ่าน USART3 → STM32 PC10/PC11 (460800).</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Boot State</h4>
+          <p>เปิดเครื่องเข้า <code>STATE_IDLE</code>, <code>homed=0</code>. ไฟเหลืองติดคงที่ = ต้องทำ Homing ก่อนจึงใช้ AUTO ได้.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ADC Auto-Zero</h4>
+          <p>บูตจะวัด zero-current voltage 100 ครั้ง แล้ว set <code>cur_zero_v</code> อัตโนมัติ. ตรวจสอบได้ผ่าน Live Expressions.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <!-- 5. HOMING -->
+  <div class="section" id="p1-homing">
+    <h2>🏠 5. Homing Procedure (Two-Pass)</h2>
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text">ต้อง Home ทุกครั้งที่เปิดเครื่อง (Flash persistence ยังไม่ implement). ทำก่อน AUTO ได้เสมอ.</div>
+    </div>
+
+    <h3>เริ่ม Homing</h3>
+    <ul style="padding-left:20px;line-height:2">
+      <li>Joystick: <strong>LT (ค้าง) + X</strong></li>
+      <li>Modbus: write <code>0x01</code> = <code>1</code> (bit 0)</li>
+    </ul>
+
+    <h3>ขั้นตอน</h3>
+    <ol class="steps" style="margin-top:16px">
+      <li>
+        <div class="step-body">
+          <h4>FAST sweep ซ้าย</h4>
+          <p>หมุนซ้าย 25% PWM (<code>HOMING_FAST_SPEED=0.25</code>). ไฟเหลืองกะพริบเร็ว 5Hz.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Sensor triggered</h4>
+          <p>EXTI rising edge บน PB6 → debounce 1ms via ISR → หยุด → BACKOFF.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>BACKOFF +20° ขวา</h4>
+          <p>PID trajectory move +20° (<code>HOMING_BACKOFF_DEG=20</code>) เพื่อออกจาก sensor zone. ไฟเหลือง/เขียวสลับ 2Hz.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>SLOW creep ซ้าย</h4>
+          <p>หมุนซ้าย 1.3% PWM (<code>HOMING_SLOW_SPEED=0.013</code>). ไฟเหลือง pulse 1Hz.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Sensor triggered → done!</h4>
+          <p><code>finish_homing()</code>: EXTI disabled, encoder zeroed, <code>cumulative_angle_deg=0</code>, <code>homed=1</code> → <code>STATE_IDLE</code>. ไฟเขียวติดคงที่.</p>
+        </div>
+      </li>
+    </ol>
+
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text"><strong>Abort Homing:</strong> กด LB บน joystick ระหว่าง homing state ใดก็ได้ → เข้า STATE_EMER ทันที.</div>
+    </div>
+
+    <h3>Soft Limits</h3>
+    <table>
+      <tr><th>Parameter</th><th>Value</th><th>Note</th></tr>
+      <tr><td>MAX_ANGLE_DEG</td><td>+540°</td><td>+1.5 รอบจาก home</td></tr>
+      <tr><td>MIN_ANGLE_DEG</td><td>−540°</td><td>−1.5 รอบจาก home</td></tr>
+    </table>
+    <p>Move commands ที่จะเกิน limit จะถูก reject ทันทีใน <code>start_move_deg()</code></p>
+  </div>
+
+  <!-- 6. STATE MACHINE -->
+  <div class="section" id="p1-sm">
+    <h2>🔄 6. State Machine</h2>
+    <div class="sm-grid">
+      <div class="sm-card">
+        <div class="state">STATE_IDLE</div>
+        <div class="desc">รอคำสั่ง. Joystick หรือ Modbus สั่งได้. homed=0 ห้ามเข้า AUTO.</div>
+        <div class="lights"><span class="dot dot-g"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_HOMING_FAST</div>
+        <div class="desc">หมุนซ้าย 25% หา sensor. กด LB → EMER.</div>
+        <div class="lights"><span class="dot dot-off"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_HOMING_BACKOFF</div>
+        <div class="desc">PID +20° ขวา. รอ trajectory เสร็จ → SLOW.</div>
+        <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_HOMING_SLOW</div>
+        <div class="desc">หมุนซ้าย 1.3% ช้ามากๆ หา edge ที่แม่นยำ.</div>
+        <div class="lights"><span class="dot dot-off"></span><span class="dot dot-y dot-slow"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_MANUAL</div>
+        <div class="desc">Joystick manual motor control. Modbus jog S-curve.</div>
+        <div class="lights"><span class="dot dot-g"></span><span class="dot dot-y"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_AUTO</div>
+        <div class="desc">Cascade PID + Trajectory. <strong>P2P / direct move เท่านั้น</strong>. เข้า SEQUENCE ถ้า 0x22&gt;0.</div>
+        <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_SEQUENCE</div>
+        <div class="desc">Multi-step pick/place sequence. Modbus 0x22 pair count + 0x04 gripper enable.</div>
+        <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_TEST</div>
+        <div class="desc">Precision / performance test. Modbus 0x01 bit4. เสร็จ → STATE_IDLE.</div>
+        <div class="lights"><span class="dot dot-g"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+      </div>
+      <div class="sm-card">
+        <div class="state">STATE_EMER</div>
+        <div class="desc">PWM=0. ออก: ปล่อย ESTOP ก่อน (ไฟ 3 ดวงกะพริบ) แล้วกด RESET_BTN.</div>
+        <div class="lights"><span class="dot dot-off"></span><span class="dot dot-y dot-slow"></span><span class="dot dot-r"></span></div>
+      </div>
+    </div>
+
+    <h3>Mode Switch (PB5 — Hardware)</h3>
+    <table>
+      <tr><th>PB5</th><th>State</th></tr>
+      <tr><td>LOW</td><td>STATE_AUTO</td></tr>
+      <tr><td>HIGH</td><td>STATE_IDLE</td></tr>
+    </table>
+  </div>
+
+  <!-- 7. TOWER LIGHTS -->
+  <div class="section" id="p1-lights">
+    <h2>🚦 7. Tower Light States</h2>
+    <div class="card">
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-off"></span><span class="dot dot-y dot-slow"></span><span class="dot dot-r"></span></div>
+        <div><div class="tower-label">EMER — ESTOP held</div><div class="tower-sub">Red solid + Yellow 1Hz blink — ปล่อย ESTOP ก่อน</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-r dot-blink"></span></div>
+        <div><div class="tower-label">EMER — ESTOP released</div><div class="tower-sub">G+Y+R blink 2Hz พร้อมกัน = "กด RESET เพื่อ clear"</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-off"></span><span class="dot dot-y"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">Not homed (startup)</div><div class="tower-sub">Yellow steady — ต้อง Home ก่อน</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-off"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">HOMING_FAST</div><div class="tower-sub">Yellow 5Hz blink — กำลัง sweep หา sensor</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">HOMING_BACKOFF</div><div class="tower-sub">Yellow/Green alternating 2Hz — กำลัง backoff</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-off"></span><span class="dot dot-y dot-slow"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">HOMING_SLOW</div><div class="tower-sub">Yellow brief pulse 1Hz — creeping เข้า</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">IDLE (homed)</div><div class="tower-sub">Green steady — พร้อมรับคำสั่ง</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-y"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">MANUAL</div><div class="tower-sub">Green + Yellow steady — joystick manual mode</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">AUTO — P2P moving</div><div class="tower-sub">Green 4Hz blink — trajectory active</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-off"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">AUTO — P2P settled</div><div class="tower-sub">Green steady — ถึงตำแหน่งแล้ว</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">SEQUENCE</div><div class="tower-sub">Green + Yellow blink 2Hz พร้อมกัน — pick/place sequence กำลังทำงาน</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
+        <div><div class="tower-label">TEST</div><div class="tower-sub">Green steady + Yellow 2Hz blink — precision/performance test กำลังทำงาน</div></div>
+      </div>
+      <div class="tower-row">
+        <div class="tower-lights"><span class="dot dot-g"></span><span class="dot dot-y"></span><span class="dot dot-r dot-warn"></span></div>
+        <div><div class="tower-label">Near Limit (ใกล้ ±540°)</div><div class="tower-sub">Red 5Hz brief flash ซ้อนทับทุก state — เข้าใกล้ soft limit ต้อง home ใหม่หรือถอย</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 8. MODBUS -->
+  <div class="section" id="p1-modbus">
+    <h2>📡 8. Modbus Register Map (FC06, Slave ID=21, 19200 8E1)</h2>
+
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text">
+        <strong>Heartbeat:</strong> Robot writes <code>0x00 = 22881</code> ("YA").
+        PC must reply <code>0x00 = 18537</code> ("HI") ภายใน 3 วินาที.
+      </div>
+    </div>
+
+    <h3>PC → Robot (Write)</h3>
+    <table>
+      <tr><th>Addr</th><th>Dec</th><th>Name</th><th>Encoding</th></tr>
+      <tr><td class="addr">0x00</td><td>0</td><td>Heartbeat reply</td><td>PC writes 18537 ("HI")</td></tr>
+      <tr><td class="addr">0x01</td><td>1</td><td>Mode select</td><td>1=Home, 2=Jog, 4=Auto, 8=SetHome, 16=Test (one-hot)</td></tr>
+      <tr><td class="addr">0x02</td><td>2</td><td>Gripper manual</td><td>bit0=Down(POWER_LATCH), bit1=Open(GRIPPER), bit2=Close</td></tr>
+      <tr><td class="addr">0x03</td><td>3</td><td>Sequence trigger</td><td>bit0=Pick, bit1=Place (edge-triggered, auto-clear)</td></tr>
+      <tr><td class="addr">0x04</td><td>4</td><td>Gripper enable</td><td>bit0: enable gripper during AUTO sequence</td></tr>
+      <tr><td class="addr">0x05</td><td>5</td><td>Jog</td><td>int16, degrees (incremental, S-curve)</td></tr>
+      <tr><td class="addr">0x06</td><td>6</td><td>Test type</td><td>0=Precision, 1=Performance</td></tr>
+      <tr><td class="addr">0x07</td><td>7</td><td>Perf speed</td><td>int16, deg/s</td></tr>
+      <tr><td class="addr">0x08</td><td>8</td><td>Perf accel</td><td>int16, deg/s²</td></tr>
+      <tr><td class="addr">0x09</td><td>9</td><td>Prec start pos</td><td>int16, degrees</td></tr>
+      <tr><td class="addr">0x10</td><td>16</td><td>Prec end pos</td><td>int16, degrees</td></tr>
+      <tr><td class="addr">0x11</td><td>17</td><td>Prec repeats</td><td>uint16</td></tr>
+      <tr><td class="addr">0x12–0x21</td><td>18–33</td><td>Seq slots ×10</td><td>int16 degrees, [pick0,place0, pick1,place1, ...]</td></tr>
+      <tr><td class="addr">0x22</td><td>34</td><td>Pair count</td><td>uint16 (0 = no sequence)</td></tr>
+      <tr><td class="addr">0x23</td><td>35</td><td>P2P unit</td><td>0=degree, 1=index</td></tr>
+      <tr><td class="addr">0x24</td><td>36</td><td>P2P target</td><td>int16</td></tr>
+      <tr><td class="addr">0x25</td><td>37</td><td>Soft stop</td><td>bit0: 1=stop immediately (no EMER)</td></tr>
+    </table>
+
+    <h3>Robot → PC (Read)</h3>
+    <table>
+      <tr><th>Addr</th><th>Dec</th><th>Name</th><th>Encoding</th></tr>
+      <tr><td class="addr">0x00</td><td>0</td><td>Heartbeat</td><td>robot writes 22881 ("YA")</td></tr>
+      <tr><td class="addr">0x26</td><td>38</td><td>Reed sensors</td><td>bit0=Up, bit1=Down, bit2=Grip (1=triggered)</td></tr>
+      <tr><td class="addr">0x27</td><td>39</td><td>Task state</td><td>0=Idle, 1=Homing, 2=Pick, 4=Place, 8=GoPoint</td></tr>
+      <tr><td class="addr">0x28</td><td>40</td><td>Position</td><td>int16, degrees × 10 (e.g., 1800 = 180.0°)</td></tr>
+      <tr><td class="addr">0x29</td><td>41</td><td>Velocity</td><td>int16, deg/s × 10</td></tr>
+      <tr><td class="addr">0x30</td><td>42</td><td>Acceleration</td><td>int16, deg/s² × 10</td></tr>
+      <tr><td class="addr">0x31</td><td>43</td><td>Emergency</td><td>1=ESTOP active</td></tr>
+    </table>
+
+    <h3>Custom Tuning Registers (Python GUI / Live Expressions)</h3>
+    <table>
+      <tr><th>Addr</th><th>Dec</th><th>Name</th><th>Encoding</th></tr>
+      <tr><td class="addr">0x0C</td><td>12</td><td>Kp_vel</td><td>uint16 ×100 (e.g. 1000 = Kp=10.0)</td></tr>
+      <tr><td class="addr">0x0D</td><td>13</td><td>Ki_vel</td><td>uint16 ×100</td></tr>
+      <tr><td class="addr">0x0E</td><td>14</td><td>Kd_vel</td><td>uint16 ×100</td></tr>
+      <tr><td class="addr">0x0F</td><td>15</td><td>Apply gains</td><td>write 1 to apply (auto-clears)</td></tr>
+      <tr><td class="addr">0x38</td><td>56</td><td>Traj type</td><td>0=S-Curve, 1=Trapezoid, 2=Direct</td></tr>
+      <tr><td class="addr">0x39</td><td>57</td><td>v_max</td><td>uint16 ×100 (rad/s)</td></tr>
+      <tr><td class="addr">0x3A</td><td>58</td><td>Current sensor</td><td>uint16, mA (read only)</td></tr>
+      <tr><td class="addr">0x3B</td><td>59</td><td>a_max</td><td>uint16 ×100 (rad/s²)</td></tr>
+      <tr><td class="addr">0x3C</td><td>60</td><td>j_max</td><td>uint16 ×100 (rad/s³, S-Curve only)</td></tr>
+      <tr><td class="addr">0x3D</td><td>61</td><td>Kp_pos</td><td>uint16 ×100</td></tr>
+      <tr><td class="addr">0x3E</td><td>62</td><td>Kd_pos</td><td>uint16 ×100</td></tr>
+      <tr><td class="addr">0x3F</td><td>63</td><td>Ki_pos</td><td>uint16 ×100</td></tr>
+    </table>
+  </div>
+
+  <!-- 9. JOYSTICK -->
+  <div class="section" id="p1-joystick">
+    <h2>🎮 9. Joystick Controls</h2>
+    <h3>Production Mode (SYS_MODE_PRODUCTION)</h3>
+    <table>
+      <tr><th>Button</th><th>Action</th></tr>
+      <tr><td><strong>RT (ค้าง) + Left Stick Y</strong></td><td>Motor manual (ramp, max_speed cap)</td></tr>
+      <tr><td><strong>LT (ค้าง) + X</strong></td><td>Start homing</td></tr>
+      <tr><td><strong>LT (ค้าง) + B</strong></td><td>Go Home (PID to 0°)</td></tr>
+      <tr><td><strong>LT (ค้าง) + RB</strong></td><td>Set Home (zero encoder at current position)</td></tr>
+      <tr><td><strong>LB</strong></td><td>Emergency stop → STATE_EMER</td></tr>
+      <tr><td><strong>L3 + R3</strong></td><td>Emergency stop → STATE_EMER</td></tr>
+    </table>
+    <h3>Joystick Test Mode (SYS_MODE_JOYSTICK_TEST)</h3>
+    <table>
+      <tr><th>Button</th><th>Action</th></tr>
+      <tr><td><strong>RT (ค้าง) + Left Stick Y</strong></td><td>Motor speed (with ramp)</td></tr>
+      <tr><td><strong>DPAD Left/Right</strong></td><td>Fine-tune motor (<code>fine_tune_speed</code>, default 2%)</td></tr>
+      <tr><td><strong>B (ค้าง)</strong></td><td>Cylinder DOWN (POWER_LATCH)</td></tr>
+      <tr><td><strong>Y (toggle)</strong></td><td>Gripper open/close</td></tr>
+      <tr><td><strong>X (ค้าง)</strong></td><td>Pneumatic ON</td></tr>
+      <tr><td><strong>A (ค้าง)</strong></td><td>EMER OUTPUT relay</td></tr>
+      <tr><td><strong>LB</strong></td><td>Pick sequence (open gripper → down → grip → up)</td></tr>
+      <tr><td><strong>RB</strong></td><td>Place sequence (down → release → up)</td></tr>
+      <tr><td><strong>DPAD Up/Down</strong></td><td>Tower Green / Yellow test</td></tr>
+    </table>
+    <p style="color:var(--muted);font-size:13px;margin-top:8px">Sequence delay: <code>seq_delay_s</code> (default 0.5s) — แก้ได้ผ่าน Live Expressions</p>
+  </div>
+
+  <!-- 10. PID TUNING -->
+  <div class="section" id="p1-pid">
+    <h2>🎛️ 10. PID Tuning</h2>
+    <h3>Default Gains (control team, accurate mode)</h3>
+    <table>
+      <tr><th>Parameter</th><th>Value</th><th>Note</th></tr>
+      <tr><td>Kp_vel</td><td>10.0</td><td>Velocity loop proportional</td></tr>
+      <tr><td>Ki_vel</td><td>0.5</td><td>Velocity integral</td></tr>
+      <tr><td>Kd_vel</td><td>0.5</td><td>Velocity derivative</td></tr>
+      <tr><td>Kp_pos</td><td>1.0</td><td>Position loop proportional</td></tr>
+      <tr><td>Ki_pos</td><td>0.0</td><td>Position integral</td></tr>
+      <tr><td>Kd_pos</td><td>0.0</td><td>Position derivative</td></tr>
+      <tr><td>v_max</td><td>6.28 rad/s</td><td>≈ 1 rev/s</td></tr>
+      <tr><td>a_max</td><td>6.28 rad/s²</td><td></td></tr>
+      <tr><td>t_acc_seg</td><td>0.8 s</td><td>Trapezoid acceleration duration</td></tr>
+      <tr><td>min_pwm_pct</td><td>5%</td><td>Overcome static friction dead zone</td></tr>
+    </table>
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text">
+        D-term ใช้ <code>-vel_filtered</code> (ไม่ใช่ d(error)/dt) เพื่อลด noise.
+        Anti-windup: clamp integrator ก่อน += (ไม่ใช่ clamp output).
+      </div>
+    </div>
+    <h3>Live-tuning via Modbus (addr 0x0C–0x0F)</h3>
+    <pre><span class="cmt">// Example: set Kp_vel=12, Ki_vel=0.3, apply</span>
+<span class="fn">modbus_write</span>(<span class="num">0x0C</span>, <span class="num">1200</span>);  <span class="cmt">// Kp_vel = 12.00</span>
+<span class="fn">modbus_write</span>(<span class="num">0x0D</span>, <span class="num">30</span>);    <span class="cmt">// Ki_vel =  0.30</span>
+<span class="fn">modbus_write</span>(<span class="num">0x0F</span>, <span class="num">1</span>);     <span class="cmt">// Apply</span></pre>
+  </div>
+
+  <!-- 11. DEBUG -->
+  <div class="section" id="p1-debug">
+    <h2>🔬 11. Debug / Live Expressions (STM32CubeIDE)</h2>
+    <table>
+      <tr><th>Variable</th><th>Type</th><th>Description</th></tr>
+      <tr><td><code>dev_dash</code></td><td>DevDashboard_t</td><td>ทุกอย่าง — Ctrl, Joy, Status, In, Out, Auto</td></tr>
+      <tr><td><code>dev_dash.Ctrl.mode</code></td><td>0–3</td><td>0=Production, 1=HW Test, 2=Joy Test, 3=Auto Motor</td></tr>
+      <tr><td><code>dev_dash.Auto.kp_vel</code></td><td>float</td><td>PID gain (แก้แล้วเห็นผลทันที)</td></tr>
+      <tr><td><code>dev_dash.Auto.target_deg</code></td><td>float</td><td>Target position (degrees)</td></tr>
+      <tr><td><code>dev_dash.Auto.start_move</code></td><td>uint8</td><td>Set 1 → trigger move</td></tr>
+      <tr><td><code>cumulative_angle_deg</code></td><td>float</td><td>Total rotation from home</td></tr>
+      <tr><td><code>homed</code></td><td>uint8</td><td>1 = homing completed</td></tr>
+      <tr><td><code>enable_telemetry</code></td><td>uint8</td><td>Set 1 ถ้าใช้ Python GUI (ปิด Modbus mode)</td></tr>
+      <tr><td><code>seq_delay_s</code></td><td>float</td><td>Sequence step delay (s)</td></tr>
+      <tr><td><code>fine_tune_speed</code></td><td>float</td><td>DPAD fine-tune speed fraction</td></tr>
+      <tr><td><code>current_state</code></td><td>enum</td><td>Current robot state</td></tr>
+    </table>
+
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text"><strong>Telemetry:</strong> ปิด (<code>enable_telemetry=0</code>) เสมอถ้าใช้ BaseSystem. เปิดเฉพาะ Python GUI เท่านั้น — ไม่งั้น Modbus จะ corrupt.</div>
+    </div>
+
+    <h3>Telemetry Format (24 bytes, LPUART1)</h3>
+    <pre><span class="cmt">// [0x7E][0x7E][pos:f32][vel:f32][acc:f32][pos_ref:f32][vel_ref:f32][0x03][0x03]</span>
+<span class="kw">import</span> struct
+pos, vel, acc, pos_ref, vel_ref = struct.<span class="fn">unpack_from</span>(<span class="str">'&lt;5f'</span>, data, <span class="num">2</span>)</pre>
+  </div>
+
+</div><!-- END phase1 -->
+
+
+<!-- ╔══════════════════════════════════════════════════════════════════════════╗ -->
+<!-- ║  PHASE 2                                                               ║ -->
+<!-- ╚══════════════════════════════════════════════════════════════════════════╝ -->
+<div id="phase2" class="phase-panel">
+
+  <div class="phase-badge badge-p2">Phase 2 — Custom PCB (หลัง Fabricate)</div>
+
+  <div class="alert alert-ok">
+    <span class="alert-icon">✅</span>
+    <div class="alert-text"><strong>Phase 1 firmware ใช้ได้บน PCB ใหม่</strong> หลัง update IOC pin mapping ตามที่ระบุด้านล่าง. Logic ทุกอย่างเหมือนกัน มีแค่ pin rename เท่านั้น.</div>
+  </div>
+
+  <div class="toc">
+    <h3>สารบัญ</h3>
+    <ul>
+      <li><a href="#p2-overview">1. PCB Overview</a></li>
+      <li><a href="#p2-pinchange">2. Pin Changes vs Phase 1</a></li>
+      <li><a href="#p2-terminal">3. Terminal Layout</a></li>
+      <li><a href="#p2-onboard">4. On-Board Chips</a></li>
+      <li><a href="#p2-ioc">5. IOC Changes Required</a></li>
+      <li><a href="#p2-commissioning">6. Commissioning Steps</a></li>
+    </ul>
+  </div>
+
+  <!-- 1. OVERVIEW -->
+  <div class="section" id="p2-overview">
+    <h2>🖥️ 1. PCB Overview</h2>
+    <div class="card-grid">
+      <div class="card">
+        <h4>Form Factor</h4>
+        <div class="value">NUCLEO-G474RE mounted center<br><span>Screw terminals left + right</span></div>
+      </div>
+      <div class="card">
+        <h4>Terminal Count</h4>
+        <div class="value">23 signals exposed<br><span>Left U1–U4 · Right U12–U18</span></div>
+      </div>
+      <div class="card">
+        <h4>On-Board ICs</h4>
+        <div class="value">TJA1050 (CAN)<br>CH340 (Modbus USB)<br>RP2040-Zero (Joystick)</div>
+      </div>
+      <div class="card">
+        <h4>CAN Terminal</h4>
+        <div class="value">U22 — CANH + CANL<br><span>Direct from TJA1050</span></div>
+      </div>
+    </div>
+
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text"><strong>TOWER_Y (PB7/CN7-21)</strong> อยู่ฝั่งซ้ายของ NUCLEO แต่ Tower G/R อยู่ขวา — ต้องลากสายออก terminal ซ้าย (U3) แล้ว wire ไปหา Tower light โดยตรง.</div>
+    </div>
+  </div>
+
+  <!-- 2. PIN CHANGES -->
+  <div class="section" id="p2-pinchange">
+    <h2>🔄 2. Pin Changes vs Phase 1</h2>
+    <table>
+      <tr><th>Signal</th><th>Phase 1 (NUCLEO)</th><th>Phase 2 (PCB)</th><th>เหตุผล</th></tr>
+      <tr>
+        <td>HOME_SENSOR</td>
+        <td class="pin">PB6</td>
+        <td><span class="pin">PC5</span> <span class="new-pcb">PCB</span></td>
+        <td>PCB routing ดีกว่า</td>
+      </tr>
+      <tr>
+        <td>Motor PWM</td>
+        <td class="pin">PA6 (TIM3 CH1)</td>
+        <td><span class="pin">PC9 (TIM3 CH4)</span> <span class="new-pcb">PCB</span></td>
+        <td>CN5-5 ชนกับ terminal layout</td>
+      </tr>
+      <tr>
+        <td>TOWER_G</td>
+        <td class="pin">PC7</td>
+        <td><span class="pin">PB12</span> <span class="new-pcb">PCB</span></td>
+        <td>Routing ไม่ข้ามฝั่ง</td>
+      </tr>
+      <tr>
+        <td>POWER_BTN</td>
+        <td class="pin">PB10</td>
+        <td><span class="pin">PB2</span> <span class="new-pcb">PCB</span></td>
+        <td>CN7 pin freed for other use</td>
+      </tr>
+      <tr>
+        <td>RESET_LED</td>
+        <td class="pin">PB4</td>
+        <td><span class="pin">PB1</span> <span class="new-pcb">PCB</span></td>
+        <td></td>
+      </tr>
+      <tr>
+        <td>MODE switch</td>
+        <td class="pin">PB5</td>
+        <td><span class="pin">PC2</span> <span class="new-pcb">PCB</span></td>
+        <td></td>
+      </tr>
+    </table>
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text">
+        PA8/PA9 (Encoder TIM1) และ PA11/PA12 (FDCAN1) <strong>ไม่เปลี่ยน</strong> — เป็น fixed AF pins ใน LQFP64 ที่ย้ายไม่ได้.
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. TERMINAL LAYOUT -->
+  <div class="section" id="p2-terminal">
+    <h2>🔌 3. Screw Terminal Layout</h2>
+    <h3>Left Side — จาก CN7/CN8 (ซ้าย NUCLEO)</h3>
+    <table>
+      <tr><th>Block</th><th>Pin A</th><th>NUCLEO</th><th>Pin B</th><th>NUCLEO</th></tr>
+      <tr><td><strong>U1</strong></td><td>REED_UP</td><td class="cfg">CN8-2 (PA1)</td><td>REED_DOWN</td><td class="cfg">CN8-3 (PA4)</td></tr>
+      <tr><td><strong>U2</strong></td><td>REED_GRIP</td><td class="cfg">CN8-4 (PB0)</td><td>POWER_LATCH</td><td class="cfg">CN8-5 (PC1)</td></tr>
+      <tr><td><strong>U3</strong></td><td>MOTOR_DIR</td><td class="cfg">CN8-1 (PA0)</td><td>TOWER_Y</td><td class="cfg">CN7-21 (PB7)</td></tr>
+      <tr><td><strong>U4</strong></td><td>RESET_BTN</td><td class="cfg">CN7-23 (PC13)</td><td class="cfg">(spare)</td><td></td></tr>
+      <tr><td>U5–U8</td><td colspan="4" class="cfg">(spare)</td></tr>
+    </table>
+
+    <h3>Right Side — จาก CN5/CN9/CN10 (ขวา NUCLEO)</h3>
+    <table>
+      <tr><th>Block</th><th>Pin A</th><th>NUCLEO</th><th>Pin B</th><th>NUCLEO</th></tr>
+      <tr><td><strong>U12</strong></td><td>ENC_A</td><td class="cfg">CN9-8 (PA8)</td><td>ENC_B</td><td class="cfg">CN5-1 (PA9)</td></tr>
+      <tr><td><strong>U13</strong></td><td>PWM</td><td class="cfg">CN5-5 (PA6)</td><td>HOME_SENSOR</td><td class="cfg">CN5-3 (PB6)</td></tr>
+      <tr><td><strong>U14</strong></td><td>TOWER_G</td><td class="cfg">CN5-2 (PC7)</td><td>TOWER_R</td><td class="cfg">CN10-1 (PC8)</td></tr>
+      <tr><td><strong>U15</strong></td><td>RESET_LED</td><td class="cfg">CN9-6 (PB4)</td><td>MODE</td><td class="cfg">CN9-5 (PB5)</td></tr>
+      <tr><td><strong>U16</strong></td><td>POWER_BTN</td><td class="cfg">CN9-7 (PB10)</td><td>ESTOP</td><td class="cfg">CN10-29 (PB13)</td></tr>
+      <tr><td><strong>U17</strong></td><td>PNEUMATIC</td><td class="cfg">CN10-3 (PC6)</td><td>GRIPPER</td><td class="cfg">CN10-17 (PB11)</td></tr>
+      <tr><td><strong>U18</strong></td><td>EMER_OUTPUT</td><td class="cfg">CN10-27 (PB14)</td><td>ADC_CURRENT</td><td class="cfg">CN10-33 (PC4)</td></tr>
+    </table>
+
+    <h3>CAN Bus (U22)</h3>
+    <table>
+      <tr><th>Terminal</th><th>Signal</th></tr>
+      <tr><td>CANH</td><td>From TJA1050 CANH</td></tr>
+      <tr><td>CANL</td><td>From TJA1050 CANL</td></tr>
+    </table>
+  </div>
+
+  <!-- 4. ON-BOARD CHIPS -->
+  <div class="section" id="p2-onboard">
+    <h2>💡 4. On-Board Chips (Internal Traces)</h2>
+    <table>
+      <tr><th>Chip</th><th>STM32 Pins</th><th>ไปที่</th><th>Function</th></tr>
+      <tr><td>RP2040-Zero</td><td>PC10 (TX) / PC11 (RX)</td><td>RP2040 RX/TX</td><td>Joystick bridge USART3</td></tr>
+      <tr><td>TJA1050</td><td>PA12 (TX) / PA11 (RX)</td><td>TJA1050 TXD/RXD</td><td>CAN transceiver FDCAN1</td></tr>
+      <tr><td>CH340</td><td>PA2 (LPUART1_TX) / PA3 (RX)</td><td>CH340 RXD/TXD</td><td>Modbus over USB-Serial</td></tr>
+    </table>
+    <p style="color:var(--muted);font-size:13px">
+      RP2040-Zero ใช้ USB-C รับสัญญาณ Xbox controller — plug USB-A cable เข้า RP2040 โดยตรง ไม่ต้องสาย extra.
+    </p>
+  </div>
+
+  <!-- 5. IOC CHANGES -->
+  <div class="section" id="p2-ioc">
+    <h2>⚙️ 5. IOC Changes Required for Phase 2</h2>
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-text">อย่า regen code โดยไม่ backup <code>main.c</code> ก่อน — CubeMX จะลบ USER CODE ออก.</div>
+    </div>
+    <table>
+      <tr><th>Signal</th><th>Old Pin</th><th>New Pin</th><th>AF / Config</th></tr>
+      <tr><td>HOME_SENSOR</td><td class="pin">PB6</td><td class="pin">PC5</td><td>GPIO_INPUT, PULLDOWN</td></tr>
+      <tr><td>Motor PWM</td><td class="pin">PA6 TIM3_CH1</td><td class="pin">PC9 TIM3_CH4</td><td>AF2, PWM mode 1</td></tr>
+      <tr><td>TOWER_G</td><td class="pin">PC7</td><td class="pin">PB12</td><td>GPIO_OUTPUT_PP</td></tr>
+      <tr><td>POWER_BTN</td><td class="pin">PB10</td><td class="pin">PB2</td><td>GPIO_INPUT, PULLUP</td></tr>
+      <tr><td>RESET_LED</td><td class="pin">PB4</td><td class="pin">PB1</td><td>GPIO_OUTPUT_PP</td></tr>
+      <tr><td>MODE switch</td><td class="pin">PB5</td><td class="pin">PC2</td><td>GPIO_IT_RISING_FALLING, PULLUP</td></tr>
+    </table>
+
+    <h3>Code Changes after IOC Regen</h3>
+    <ol class="steps">
+      <li>
+        <div class="step-body">
+          <h4>Update main.h defines</h4>
+          <pre><span class="cmt">// เปลี่ยน</span>
+<span class="kw">#define</span> HOME_SENSOR_Pin       GPIO_PIN_6
+<span class="kw">#define</span> HOME_SENSOR_GPIO_Port GPIOB
+<span class="cmt">// เป็น</span>
+<span class="kw">#define</span> HOME_SENSOR_Pin       GPIO_PIN_5
+<span class="kw">#define</span> HOME_SENSOR_GPIO_Port GPIOC
+
+<span class="cmt">// PWM: เปลี่ยน TIM_CHANNEL_1 → TIM_CHANNEL_4 ใน HAL_TIM_PWM_Start() และ SET_COMPARE</span></pre>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Update EXTI9_5_IRQHandler</h4>
+          <p>PB6 (EXTI6) → PC5 (EXTI5). EXTI5_IRQHandler อาจแยกออกมาถ้า PC5 ใช้ EXTI5 แทน EXTI9_5.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Rename label "POWER_LATCH" → "GRP_DOWN" และ "GRIPPER" → "GRP_CLOSE"</h4>
+          <p>Optional — ทำให้ชัดเจนขึ้นสำหรับ PCB ใหม่ ไม่จำเป็นสำหรับ compile.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <!-- 6. COMMISSIONING -->
+  <div class="section" id="p2-commissioning">
+    <h2>🏭 6. Commissioning Steps (PCB ใหม่)</h2>
+    <ol class="steps">
+      <li>
+        <div class="step-body">
+          <h4>ตรวจสาย Power</h4>
+          <p>Measure 3V3 และ 5V บน terminal ก่อนเสียบ NUCLEO. ตรวจ short ระหว่าง supply rails.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Flash Phase 2 Firmware</h4>
+          <p>Update IOC → regen → restore USER CODE → build → flash. ตรวจ LD2 blink.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ Digital I/O</h4>
+          <p>ใช้ <code>SYS_MODE_HARDWARE_TEST</code> (Live Expressions <code>dev_dash.Ctrl.mode=1</code>). Force แต่ละ output ทีละตัว. กด reed switches ทีละตัว ดูว่า bit ใน <code>dev_dash</code> เปลี่ยน.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ Encoder</h4>
+          <p>หมุน shaft ด้วยมือ ดู <code>dev_dash.Status.encoder</code> เพิ่ม/ลดถูกทิศ. 1 รอบ = 8192 counts.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ Motor PWM</h4>
+          <p>Set <code>dev_dash.Ctrl.force_motor_speed=0.1</code> (mode=1). ตรวจทิศหมุน. ถ้าสวน → set <code>dev_dash.Auto.motor_invert=1</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ Homing Sensor</h4>
+          <p>ใช้ Joystick Test mode เดิน arm ผ่าน HOME_SENSOR. ดู <code>HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin)</code> = SET ตอน blade เข้า.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>Run Full Homing</h4>
+          <p>Switch mode → Production. กด LT+X. ดูไฟ tower ตาม sequence. หลัง done: ไฟเขียวติด, <code>homed=1</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ Modbus + BaseSystem</h4>
+          <p>เปิด BaseSystem.exe. Connect COM port 19200 8E1 Slave 21. ดู heartbeat, ลอง P2P move.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <h4>ทดสอบ CAN</h4>
+          <p>ต่อ TJA1050 terminal กับ node อื่น. ใช้ <code>HAL_FDCAN_GetRxFifoFillLevel</code> เช็ค receive. ส่ง test frame ดู ID.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+</div><!-- END phase2 -->
+</div><!-- container -->
+
+<script>
+function showPhase(n) {
+  document.querySelectorAll('.phase-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.phase-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('phase' + n).classList.add('active');
+  document.querySelectorAll('.phase-btn')[n-1].classList.add('active');
+}
+</script>
+</body>
+</html>
