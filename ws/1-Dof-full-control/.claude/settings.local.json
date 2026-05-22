@@ -21,7 +21,8 @@
       "PowerShell(Get-PnpDevice *)",
       "PowerShell([System.IO.Ports.SerialPort]::GetPortNames\\(\\) | Sort-Object)",
       "PowerShell(Get-CimInstance *)",
-      "PowerShell(reg query *)"
+      "PowerShell(reg query *)",
+      "Bash(dir \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\" /b)"
     ]
   }
 }

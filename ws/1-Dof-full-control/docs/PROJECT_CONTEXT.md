@@ -40,7 +40,7 @@ Encoder → Windowed velocity → IIR filter → Cascade PID → PWM
 - Anti-windup: accumulator clamping (ไม่ clamp output)
 - D-term ใช้ `-velocity` feedback ไม่ใช่ `d(error)/dt`
 
-**Default PID gains:** Kp_vel=10, Ki_vel=0.5, Kd_vel=0.5, Kp_pos=1.0
+**Default PID gains (pid_control.c):** kp_vel=30, ki_vel=0.1, kd_vel=0.0, kp_pos=1.0
 
 **Trajectory Generators:**
 - S-Curve (5-segment constant-jerk) — `SCURVE.h`
@@ -51,7 +51,7 @@ Encoder → Windowed velocity → IIR filter → Cascade PID → PWM
 - `ENCODER.h` → `Encoder_t` struct
 
 ### Main Loop — flag_10ms @ 100 Hz
-- ESTOP polling (debounce 30ms anti-EMI)
+- ESTOP polling (debounce 200ms anti-EMI)
 - Reed switch read
 - ADC current sensor (moving average 1/8 IIR)
 - Modbus process
@@ -72,7 +72,7 @@ STATE_IDLE  ←─────────────────────�
 STATE_HOMING_FAST   → motor left 25% PWM                     │
   │ sensor EXTI                                               │
   ↓                                                           │
-STATE_HOMING_BACKOFF → PID move +20° right                   │
+STATE_HOMING_BACKOFF → direct PWM 20% right 1s                │
   │ traj_done + settled                                       │
   ↓                                                           │
 STATE_HOMING_SLOW   → motor left 1.3% PWM                    │
@@ -91,9 +91,9 @@ STATE_EMER  ← ESTOP pin LOW / LB joy / cancel_move
 
 **Homing detail (Two-Pass):**
 1. `STATE_HOMING_FAST`: หมุนซ้าย 25% PWM
-2. Rising edge (HOME_SENSOR PB6, PNP→opto active HIGH) → debounce 1ms via ISR
-3. `STATE_HOMING_BACKOFF`: PID backoff +20°
-4. `STATE_HOMING_SLOW`: หมุนซ้าย 1.3% PWM
+2. Rising edge (HOME_SENSOR PC3, PULLUP active HIGH) → ISR EXTI3
+3. `STATE_HOMING_BACKOFF`: direct PWM ขวา 20% นาน 100 ticks (1s)
+4. `STATE_HOMING_SLOW`: หมุนซ้าย 6% PWM
 5. Rising edge อีกครั้ง → `finish_homing()` → `cumulative_angle_deg=0`, `homed=1`
 
 **Soft limits:** ±540° (1.5 รอบ) จาก home — check ใน `start_move_deg()`
@@ -130,7 +130,7 @@ STATE_EMER  ← ESTOP pin LOW / LB joy / cancel_move
 ### Sensors & Safety
 | Pin | Function | Config | Logic |
 |-----|----------|--------|-------|
-| PB6 | HOME_SENSOR | PULLDOWN, EXTI rising | HIGH=detected |
+| PC3 | HOME_SENSOR | PULLUP, EXTI3 rising | HIGH=detected |
 | PA1 | REED_UP | PULLDOWN | LOW=triggered |
 | PA4 | REED_DOWN | PULLDOWN | LOW=triggered |
 | PB0 | REED_GRIP | PULLDOWN | LOW=triggered |
@@ -226,7 +226,7 @@ STATE_EMER  ← ESTOP pin LOW / LB joy / cancel_move
 
 | Signal | Current (NUCLEO) | New PCB |
 |--------|-----------------|---------|
-| HOME_SENSOR | PB6 | PC5 |
+| HOME_SENSOR | PC3 | PC3 (ไม่เปลี่ยน) |
 | PWM | PA6 (TIM3 CH1) | PC9 (TIM3 CH4) |
 | TOWER_G | PC7 | PB12 |
 | POWER_BTN | PB10 | PB2 |

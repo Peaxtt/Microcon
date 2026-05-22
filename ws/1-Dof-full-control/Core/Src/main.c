@@ -168,8 +168,8 @@ volatile float   g_distff_tau_d   = 0.0f;   // disturbance estimate input (from 
 
 // ── Motor + Encoder direction invert ─────────────────────────────────────────
 volatile uint8_t motor_dir_inverted    = 0;     // 1 = flip PID PWM output
-volatile uint8_t encoder_inverted      = 0;     // 1 = flip encoder count direction
-volatile float   homing_backoff_speed  = 0.05f; // PWM fraction going RIGHT after fast trigger
+volatile uint8_t encoder_inverted      = 1;     // 1 = flip encoder count direction
+volatile float   homing_backoff_speed  = 0.20f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 
 // --- Live Expressions Dashboard & UI Testing ---
@@ -181,7 +181,17 @@ typedef enum {
 } SystemMode_t;
 
 typedef struct {
-  SystemMode_t mode;
+  SystemMode_t mode;          // SYS_MODE_PRODUCTION (normal) or test modes
+  float    ramp_rate;         // motor speed slew rate per 10ms (0.01=slow, 0.1=fast)
+  float    max_speed;         // motor speed hard cap 0.0–1.0
+  float    cur_zero_v;        // WCS1800 zero-current voltage (calibrated at boot)
+  float    cur_sens;          // WCS1800 sensitivity V/A (0.066)
+  uint8_t  telemetry_mode;    // 0=Modbus, 1=Simulink telemetry via LPUART1
+  float    acc_alpha;         // velocity filter alpha (0.1=smooth, 1.0=raw)
+} DashCtrl_t;
+
+// ── Test mode overrides (only used in HW_TEST / MOTOR_TEST modes) ──────────
+typedef struct {
   uint8_t  force_pneumatic;
   uint8_t  force_gripper;
   uint8_t  force_tower_green;
@@ -189,19 +199,10 @@ typedef struct {
   uint8_t  force_tower_red;
   uint8_t  force_emer_out;
   float    force_motor_speed;
-  // Motor tuning (ปรับ real-time ผ่าน Live Expressions)
-  float    ramp_rate;      // slew rate /10ms: 0.01=slow 0.1=fast
-  float    max_speed;      // hard cap 0.0-1.0
-  // Mode 3: Auto Motor Test
-  float    auto_speed;         // speed 0.0-1.0
-  uint16_t auto_period_fwd_ms; // ms ทิศ Forward (DIR=SET)
-  uint16_t auto_period_rev_ms; // ms ทิศ Reverse (DIR=RESET)
-  // Current sensor calibration (WCS1800)
-  float    cur_zero_v;     // voltage ที่ 0A (วัดจาก multimeter ตอนไม่มีกระแส)
-  float    cur_sens;       // sensitivity V/A (0.066 = 66mV/A)
-  uint8_t  telemetry_mode; // 0=Modbus(normal), 1=Telemetry via LPUART1 USB
-  float    acc_alpha;      // acceleration LPF alpha (0.0=heavy filter, 1.0=raw)
-} DashCtrl_t;
+  float    auto_speed;         // AUTO_MOTOR_TEST speed 0.0–1.0
+  uint16_t auto_period_fwd_ms; // AUTO_MOTOR_TEST forward time (ms)
+  uint16_t auto_period_rev_ms; // AUTO_MOTOR_TEST reverse time (ms)
+} DashTest_t;
 
 typedef struct {
   uint8_t  connected;
@@ -261,14 +262,6 @@ typedef struct {
   float    t2_seg;       // S-Curve: const-accel duration (s)
   float    t_acc_seg;    // Trapezoid: accel duration (s)
   float    t_cruise_seg; // cruise duration (s)
-  // PID gains
-  float    kp_vel;
-  float    ki_vel;
-  float    kd_vel;
-  float    kp_pos;
-  float    ki_pos;
-  float    kd_pos;
-  uint8_t  motor_invert; // set 1 ถ้า motor วิ่งสวนทาง (error เพิ่มแทนที่จะลด)
   // --- STATUS (read these) ---
   float    pos_rad;      // current position (rad)
   float    vel_rad_s;    // current velocity (rad/s)
@@ -281,12 +274,13 @@ typedef struct {
 } DashAuto_t;
 
 typedef struct {
-  DashCtrl_t   Ctrl;
-  DashJoy_t    Joy;
-  DashStatus_t Status;
-  DashIn_t     In;
-  DashOut_t    Out;
-  DashAuto_t   Auto;
+  DashCtrl_t   Ctrl;    // system mode & production settings
+  DashAuto_t   Auto;    // P2P commands + live status
+  DashStatus_t Status;  // live telemetry (read-only)
+  DashIn_t     In;      // raw GPIO inputs
+  DashOut_t    Out;     // raw GPIO outputs
+  DashTest_t   Test;    // HW/motor test overrides (test modes only)
+  DashJoy_t    Joy;     // joystick state
 } DevDashboard_t;
 
 DevDashboard_t dev_dash = {
@@ -311,12 +305,11 @@ DevDashboard_t dev_dash = {
   .Auto.t2_seg        = 0.1f,
   .Auto.t_acc_seg     = 0.3f,    // control team
   .Auto.t_cruise_seg  = 0.2f,
-  .Auto.kp_vel        = 30.0f,   // control team
-  .Auto.ki_vel        = 0.1f,
-  .Auto.kd_vel        = 0.0f,
-  .Auto.kp_pos        = 1.0f,
-  .Auto.ki_pos        = 0.0f,
-  .Auto.kd_pos        = 0.0f,
+  // PID gains: edit kp_vel / ki_vel / kp_pos etc. in pid_control.c or Live Expressions
+  // Test mode defaults
+  .Test.auto_speed         = 0.30f,
+  .Test.auto_period_fwd_ms = 1000,
+  .Test.auto_period_rev_ms = 1000,
 };
 
 /* USER CODE END PV */
@@ -654,18 +647,18 @@ int main(void)
       int16_t step_cmd = (int16_t)mb_slave.registers[10];
       if (step_cmd != 0) {
         dev_dash.Ctrl.mode = SYS_MODE_HARDWARE_TEST;
-        dev_dash.Ctrl.force_motor_speed = (float)step_cmd / 10000.0f; 
+        dev_dash.Test.force_motor_speed = (float)step_cmd / 10000.0f; 
         python_step_active = 1;
       } else if (python_step_active) {
         dev_dash.Ctrl.mode = SYS_MODE_PRODUCTION;
-        dev_dash.Ctrl.force_motor_speed = 0.0f;
+        dev_dash.Test.force_motor_speed = 0.0f;
         python_step_active = 0;
       }
 
       if (mb_slave.registers[15] == 1) {
-        dev_dash.Auto.kp_vel = (float)mb_slave.registers[12] / 100.0f;
-        dev_dash.Auto.ki_vel = (float)mb_slave.registers[13] / 100.0f;
-        dev_dash.Auto.kd_vel = (float)mb_slave.registers[14] / 100.0f;
+        kp_vel = (float)mb_slave.registers[12] / 100.0f;
+        ki_vel = (float)mb_slave.registers[13] / 100.0f;
+        kd_vel = (float)mb_slave.registers[14] / 100.0f;
         
         float target_rad = (float)((int16_t)mb_slave.registers[11]) / 1000.0f;
         dev_dash.Auto.target_deg = target_rad * (180.0f / 3.14159265f);
@@ -684,10 +677,10 @@ int main(void)
              dev_dash.Auto.j_max = (float)mb_slave.registers[0x3C] / 100.0f;
         }
         if (mb_slave.registers[0x3D] > 0) {
-             dev_dash.Auto.kp_pos = (float)mb_slave.registers[0x3D] / 100.0f;
+             kp_pos = (float)mb_slave.registers[0x3D] / 100.0f;
         }
-        dev_dash.Auto.kd_pos = (float)mb_slave.registers[0x3E] / 100.0f;
-        dev_dash.Auto.ki_pos = (float)mb_slave.registers[0x3F] / 100.0f;
+        kd_pos = (float)mb_slave.registers[0x3E] / 100.0f;
+        ki_pos = (float)mb_slave.registers[0x3F] / 100.0f;
 
         dev_dash.Auto.start_move = 1;
         
@@ -773,11 +766,17 @@ int main(void)
         HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_SET);
         mb_slave.registers[0x27] = 0;
         motor_speed_cmd = 0.0f;
-        // ออก EMER: ต้องปล่อย ESTOP **และ** กด RESET button พร้อมกัน
+        // ออก EMER: ต้องปล่อย ESTOP **และ** กด RESET ค้างไว้ 50ms (5 ticks × 10ms)
+        static uint8_t emer_rel_cnt = 0;
         uint8_t estop_released = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port,   ESTOP_Pin)     == GPIO_PIN_SET);
         uint8_t reset_pressed  = (HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin) == GPIO_PIN_RESET);
-        uint8_t emer_rel = estop_released && reset_pressed;
-        if (emer_rel) {
+        if (estop_released && reset_pressed) {
+          if (emer_rel_cnt < 10) emer_rel_cnt++;
+        } else {
+          emer_rel_cnt = 0;
+        }
+        if (emer_rel_cnt >= 5) {
+          emer_rel_cnt = 0;
           dev_dash.Auto.start_move  = 0;
           dev_dash.Auto.cancel_move = 0;
           g_trapezoid.is_active     = 0;
@@ -797,7 +796,7 @@ int main(void)
             GPIO_PinState mode_now = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
             current_state = (mode_now == GPIO_PIN_RESET) ? STATE_AUTO : STATE_MANUAL;
           } else {
-            current_state = STATE_IDLE; // test modes → IDLE
+            current_state = STATE_IDLE;
           }
         }
       }
@@ -848,15 +847,15 @@ int main(void)
         // Bypass State Machine and Modbus commands completely.
         // Apply physical outputs directly from the Live Expressions variables.
         
-        HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, dev_dash.Ctrl.force_pneumatic ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, dev_dash.Ctrl.force_gripper ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Ctrl.force_tower_green ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Ctrl.force_tower_yellow ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Ctrl.force_tower_red ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Ctrl.force_emer_out ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, dev_dash.Test.force_pneumatic ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, dev_dash.Test.force_gripper ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Test.force_tower_green ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Test.force_tower_yellow ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Test.force_tower_red ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Test.force_emer_out ? GPIO_PIN_SET : GPIO_PIN_RESET);
         
         // Apply Forced Motor Speed
-        safe_speed = dev_dash.Ctrl.force_motor_speed;
+        safe_speed = dev_dash.Test.force_motor_speed;
         if (safe_speed > 1.0f) safe_speed = 1.0f;
         if (safe_speed < -1.0f) safe_speed = -1.0f;
         
@@ -1034,8 +1033,8 @@ int main(void)
         static float    auto_ramp       = 0.0f;
         static uint8_t  auto_dead_cnt   = 0;
 
-        uint16_t cur_period_ms = auto_test_dir ? dev_dash.Ctrl.auto_period_fwd_ms
-                                                : dev_dash.Ctrl.auto_period_rev_ms;
+        uint16_t cur_period_ms = auto_test_dir ? dev_dash.Test.auto_period_fwd_ms
+                                                : dev_dash.Test.auto_period_rev_ms;
         uint16_t half_period = (cur_period_ms / 10);
         if (half_period < 1) half_period = 1;
         auto_test_timer++;
@@ -1044,7 +1043,7 @@ int main(void)
           auto_test_dir = !auto_test_dir;
           auto_dead_cnt = 5; // dead-time 50ms ก่อนสลับทิศ
         }
-        float auto_target = dev_dash.Ctrl.auto_speed;
+        float auto_target = dev_dash.Test.auto_speed;
         if (auto_target > dev_dash.Ctrl.max_speed) auto_target = dev_dash.Ctrl.max_speed;
         if (auto_target < 0.0f) auto_target = 0.0f;
 

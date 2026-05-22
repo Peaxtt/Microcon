@@ -137,7 +137,7 @@
 
 <div class="page-header">
   <h1>🤖 1-DOF Robot Control System</h1>
-  <div class="subtitle">STM32G474RETx — Setup &amp; Operation Guide &nbsp;|&nbsp; Last updated: 2026-05-22</div>
+  <div class="subtitle">STM32G474RETx — Setup &amp; Operation Guide &nbsp;|&nbsp; Last updated: 2026-05-22 rev2</div>
   <div class="phase-selector">
     <button class="phase-btn active" onclick="showPhase(1)">Phase 1 — NUCLEO (ปัจจุบัน)</button>
     <button class="phase-btn" onclick="showPhase(2)">Phase 2 — Custom PCB (หลัง fabricate)</button>
@@ -206,12 +206,11 @@
     </div>
     <div class="alert alert-info">
       <span class="alert-icon">ℹ️</span>
-      <div class="alert-text"><strong>HOME_SENSOR:</strong> PNP proximity → Opto-isolator → PB6.
-        Active HIGH (GPIO_PIN_SET = detected). EXTI rising edge. เปิดเฉพาะตอน homing เท่านั้น.</div>
+      <div class="alert-text"><strong>HOME_SENSOR (PC3):</strong> NPN open-collector → PULLUP. ปกติ LOW (0) = ไม่ trigger. ตรวจพบ HIGH (1) = triggered. EXTI3 rising edge. เปิดเฉพาะตอน homing (FAST + SLOW) เท่านั้น. ดูค่าได้ตลอดเวลาผ่าน <code>home_sensor_raw</code>.</div>
     </div>
     <div class="alert alert-warn">
       <span class="alert-icon">⚠️</span>
-      <div class="alert-text"><strong>ESTOP (PB13):</strong> Active LOW. PULLUP. ต้องกดค้างพร้อม RESET_BTN จึงจะออกจาก STATE_EMER ได้.</div>
+      <div class="alert-text"><strong>ESTOP (PB13):</strong> Active LOW, PULLUP, debounce 200ms (20 ticks × 10ms). ปล่อย ESTOP แล้วกด RESET ค้างไว้ 50ms → ออก STATE_EMER. ถ้ากด RESET แล้วไม่ออก = ESTOP ยังถูกกดอยู่หรือ noise ทริค → ปล่อยทุกอย่างแล้วกดใหม่.</div>
     </div>
   </div>
 
@@ -231,7 +230,7 @@
     <h3>Sensors &amp; Safety</h3>
     <table>
       <tr><th>Pin</th><th>Label</th><th>Config</th><th>Active</th><th>Function</th></tr>
-      <tr><td class="pin">PB6</td><td>HOME_SENSOR</td><td class="cfg">PULLDOWN, EXTI rising</td><td class="hi">HIGH</td><td>Proximity sensor (homing)</td></tr>
+      <tr><td class="pin">PC3</td><td>HOME_SENSOR</td><td class="cfg">PULLUP, EXTI3 rising</td><td class="hi">HIGH</td><td>Proximity sensor (homing) — ปกติ LOW, ตรวจพบ HIGH</td></tr>
       <tr><td class="pin">PA1</td><td>REED_UP</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Cylinder UP end-stop</td></tr>
       <tr><td class="pin">PA4</td><td>REED_DOWN</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Cylinder DOWN end-stop</td></tr>
       <tr><td class="pin">PB0</td><td>REED_GRIP</td><td class="cfg">PULLDOWN</td><td class="lo">LOW</td><td>Gripper CLOSED sensor</td></tr>
@@ -276,7 +275,7 @@
       <tr><td>PA1 REED_UP</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
       <tr><td>PA4 REED_DOWN</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
       <tr><td>PB0 REED_GRIP</td><td>GPIO_INPUT, <strong>PULLDOWN</strong></td><td class="hi">✓ done</td></tr>
-      <tr><td>PB6 HOME_SENSOR</td><td>GPIO_INPUT, <strong>PULLDOWN</strong> (EXTI enabled in code only during homing)</td><td class="hi">✓ done</td></tr>
+      <tr><td>PC3 HOME_SENSOR</td><td>GPIO_INPUT, <strong>PULLUP</strong> (EXTI3 enabled in code only during homing)</td><td class="hi">✓ done</td></tr>
       <tr><td>PB13 ESTOP</td><td>GPIO_INPUT, <strong>PULLUP</strong></td><td class="hi">✓ done</td></tr>
       <tr><td>TIM1</td><td>Encoder TI12 mode, PA8/PA9, period=65535</td><td class="hi">✓ done</td></tr>
       <tr><td>TIM3 CH1</td><td>PWM, PA6, period=8499, prescaler=0 → 20 kHz</td><td class="hi">✓ done</td></tr>
@@ -286,7 +285,8 @@
       <tr><td>FDCAN1</td><td>PA11/PA12, Prescaler=5, Seg1=25, Seg2=8, SJW=1, Classic CAN</td><td class="hi">✓ done</td></tr>
       <tr><td>ADC2 CH5</td><td>PC4, single-ended, 12-bit, software trigger</td><td class="hi">✓ done</td></tr>
       <tr><td>IWDG</td><td>Prescaler=32, Reload=4095 → ~3.2s timeout</td><td class="hi">✓ done</td></tr>
-      <tr><td>EXTI9_5 priority</td><td>0 (highest) — covers PB5 MODE + PB6 HOME_SENSOR</td><td class="hi">✓ done</td></tr>
+      <tr><td>EXTI9_5 priority</td><td>0 (highest) — covers PB5 MODE switch</td><td class="hi">✓ done</td></tr>
+      <tr><td>EXTI3 priority</td><td>0 (highest) — PC3 HOME_SENSOR (added in USER CODE stm32g4xx_it.c)</td><td class="hi">✓ done</td></tr>
     </table>
   </div>
 
@@ -353,19 +353,19 @@
       <li>
         <div class="step-body">
           <h4>Sensor triggered</h4>
-          <p>EXTI rising edge บน PB6 → debounce 1ms via ISR → หยุด → BACKOFF.</p>
+          <p>EXTI3 rising edge บน PC3 → ISR callback → หยุดทันที → BACKOFF.</p>
         </div>
       </li>
       <li>
         <div class="step-body">
-          <h4>BACKOFF +20° ขวา</h4>
-          <p>PID trajectory move +20° (<code>HOMING_BACKOFF_DEG=20</code>) เพื่อออกจาก sensor zone. ไฟเหลือง/เขียวสลับ 2Hz.</p>
+          <h4>BACKOFF ขวา (direct PWM)</h4>
+          <p>Direct PWM ขวา <code>homing_backoff_speed=0.20</code> นาน <code>homing_backoff_ticks=100</code> ticks (100×10ms = 1s). ไม่ใช้ PID. ไฟเหลือง/เขียวสลับ 2Hz. ปรับได้ผ่าน Live Expressions.</p>
         </div>
       </li>
       <li>
         <div class="step-body">
           <h4>SLOW creep ซ้าย</h4>
-          <p>หมุนซ้าย 1.3% PWM (<code>HOMING_SLOW_SPEED=0.013</code>). ไฟเหลือง pulse 1Hz.</p>
+          <p>Direct PWM ซ้าย 6% (<code>HOMING_SLOW_SPEED=0.06</code>). ไฟเหลือง pulse 1Hz.</p>
         </div>
       </li>
       <li>
@@ -406,7 +406,7 @@
       </div>
       <div class="sm-card">
         <div class="state">STATE_HOMING_BACKOFF</div>
-        <div class="desc">PID +20° ขวา. รอ trajectory เสร็จ → SLOW.</div>
+        <div class="desc">Direct PWM ขวา <code>homing_backoff_speed</code> นาน <code>homing_backoff_ticks</code> ticks → SLOW.</div>
         <div class="lights"><span class="dot dot-g dot-blink"></span><span class="dot dot-y dot-blink"></span><span class="dot dot-off"></span></div>
       </div>
       <div class="sm-card">
@@ -436,7 +436,7 @@
       </div>
       <div class="sm-card">
         <div class="state">STATE_EMER</div>
-        <div class="desc">PWM=0. ออก: ปล่อย ESTOP ก่อน (ไฟ 3 ดวงกะพริบ) แล้วกด RESET_BTN.</div>
+        <div class="desc">PWM=0. ออก: ปล่อย ESTOP ก่อน (ไฟ 3 ดวงกะพริบ) แล้วกด RESET_BTN ค้างไว้ 50ms.</div>
         <div class="lights"><span class="dot dot-off"></span><span class="dot dot-y dot-slow"></span><span class="dot dot-r"></span></div>
       </div>
     </div>
@@ -600,20 +600,25 @@
   <!-- 10. PID TUNING -->
   <div class="section" id="p1-pid">
     <h2>🎛️ 10. PID Tuning</h2>
-    <h3>Default Gains (control team, accurate mode)</h3>
+    <h3>Default Gains (control team values — pid_control.c)</h3>
     <table>
-      <tr><th>Parameter</th><th>Value</th><th>Note</th></tr>
-      <tr><td>Kp_vel</td><td>10.0</td><td>Velocity loop proportional</td></tr>
-      <tr><td>Ki_vel</td><td>0.5</td><td>Velocity integral</td></tr>
-      <tr><td>Kd_vel</td><td>0.5</td><td>Velocity derivative</td></tr>
-      <tr><td>Kp_pos</td><td>1.0</td><td>Position loop proportional</td></tr>
-      <tr><td>Ki_pos</td><td>0.0</td><td>Position integral</td></tr>
-      <tr><td>Kd_pos</td><td>0.0</td><td>Position derivative</td></tr>
-      <tr><td>v_max</td><td>6.28 rad/s</td><td>≈ 1 rev/s</td></tr>
-      <tr><td>a_max</td><td>6.28 rad/s²</td><td></td></tr>
-      <tr><td>t_acc_seg</td><td>0.8 s</td><td>Trapezoid acceleration duration</td></tr>
-      <tr><td>min_pwm_pct</td><td>5%</td><td>Overcome static friction dead zone</td></tr>
+      <tr><th>Variable</th><th>Value</th><th>Note</th></tr>
+      <tr><td><code>kp_vel</code></td><td>30.0</td><td>Velocity loop proportional</td></tr>
+      <tr><td><code>ki_vel</code></td><td>0.1</td><td>Velocity integral</td></tr>
+      <tr><td><code>kd_vel</code></td><td>0.0</td><td>Velocity derivative</td></tr>
+      <tr><td><code>kp_pos</code></td><td>1.0</td><td>Position loop proportional</td></tr>
+      <tr><td><code>ki_pos</code></td><td>0.0</td><td>Position integral</td></tr>
+      <tr><td><code>kd_pos</code></td><td>0.0</td><td>Position derivative</td></tr>
+      <tr><td><code>dev_dash.Auto.v_max</code></td><td>6.28 rad/s</td><td>≈ 1 rev/s</td></tr>
+      <tr><td><code>dev_dash.Auto.a_max</code></td><td>12.56 rad/s²</td><td>control team</td></tr>
+      <tr><td><code>dev_dash.Auto.t_acc_seg</code></td><td>0.3 s</td><td>Trapezoid accel duration</td></tr>
+      <tr><td><code>dev_dash.Auto.t_cruise_seg</code></td><td>0.2 s</td><td>Cruise duration</td></tr>
+      <tr><td><code>min_pwm_pct</code></td><td>5%</td><td>Overcome static friction dead zone</td></tr>
     </table>
+    <div class="alert alert-info">
+      <span class="alert-icon">ℹ️</span>
+      <div class="alert-text">PID gains อยู่ใน <code>pid_control.c</code> — แก้ได้ผ่าน Live Expressions โดยตรง (<code>kp_vel</code>, <code>ki_vel</code> ฯลฯ) หรือผ่าน Modbus 0x0C–0x0F. <strong>ไม่ต้องใช้ dev_dash.Auto.kp_vel อีกต่อไป</strong> (ลบออกแล้ว).</div>
+    </div>
     <div class="alert alert-info">
       <span class="alert-icon">ℹ️</span>
       <div class="alert-text">
@@ -631,19 +636,41 @@
   <!-- 11. DEBUG -->
   <div class="section" id="p1-debug">
     <h2>🔬 11. Debug / Live Expressions (STM32CubeIDE)</h2>
+    <h3>dev_dash Structure (Live Expressions)</h3>
+    <table>
+      <tr><th>Sub-struct</th><th>ใช้ทำอะไร</th></tr>
+      <tr><td><code>dev_dash.Ctrl</code></td><td>mode, ramp_rate, max_speed, cur_zero_v, telemetry_mode</td></tr>
+      <tr><td><code>dev_dash.Auto</code></td><td>คำสั่ง P2P + status อ่าน (target_deg, start_move, pos_rad…)</td></tr>
+      <tr><td><code>dev_dash.Status</code></td><td>live telemetry อ่านอย่างเดียว (state, motor_cmd, pos_deg…)</td></tr>
+      <tr><td><code>dev_dash.In</code></td><td>raw GPIO input states (estop, reset, mode_switch, power)</td></tr>
+      <tr><td><code>dev_dash.Out</code></td><td>raw output states (pwm, dir, tower_g/y/r, emer…)</td></tr>
+      <tr><td><code>dev_dash.Test</code></td><td>force_* overrides + auto_speed/period — <strong>test modes เท่านั้น</strong></td></tr>
+      <tr><td><code>dev_dash.Joy</code></td><td>joystick state (connected, L_Y, R_T, buttons)</td></tr>
+    </table>
+
+    <h3>Key Variables (เพิ่มใน Live Expressions โดยตรง)</h3>
     <table>
       <tr><th>Variable</th><th>Type</th><th>Description</th></tr>
-      <tr><td><code>dev_dash</code></td><td>DevDashboard_t</td><td>ทุกอย่าง — Ctrl, Joy, Status, In, Out, Auto</td></tr>
-      <tr><td><code>dev_dash.Ctrl.mode</code></td><td>0–3</td><td>0=Production, 1=HW Test, 2=Joy Test, 3=Auto Motor</td></tr>
-      <tr><td><code>dev_dash.Auto.kp_vel</code></td><td>float</td><td>PID gain (แก้แล้วเห็นผลทันที)</td></tr>
+      <tr><td><code>kp_vel</code></td><td>float</td><td>Velocity PID Kp — แก้ได้ real-time</td></tr>
+      <tr><td><code>ki_vel</code></td><td>float</td><td>Velocity PID Ki</td></tr>
+      <tr><td><code>kd_vel</code></td><td>float</td><td>Velocity PID Kd</td></tr>
+      <tr><td><code>kp_pos</code></td><td>float</td><td>Position PID Kp</td></tr>
+      <tr><td><code>pid_enabled</code></td><td>uint8</td><td>0 = freeze PID + PWM=0 ทันที</td></tr>
+      <tr><td><code>encoder_inverted</code></td><td>uint8</td><td>1 = กลับทิศ encoder (default=1)</td></tr>
+      <tr><td><code>motor_dir_inverted</code></td><td>uint8</td><td>1 = กลับทิศ motor output</td></tr>
+      <tr><td><code>homing_backoff_speed</code></td><td>float</td><td>PWM ตอน backoff ขวา (default=0.20)</td></tr>
+      <tr><td><code>homing_backoff_ticks</code></td><td>uint32</td><td>จำนวน 10ms ticks สำหรับ backoff (default=100=1s)</td></tr>
+      <tr><td><code>fine_tune_speed</code></td><td>float</td><td>DPAD fine-tune speed (default=0.02)</td></tr>
+      <tr><td><code>refff_enabled</code></td><td>uint8</td><td>1 = เปิด reference feedforward</td></tr>
+      <tr><td><code>V_supply</code></td><td>float</td><td>Bus voltage (V) สำหรับ feedforward (default=24.0)</td></tr>
+      <tr><td><code>home_sensor_raw</code></td><td>uint8</td><td>อ่านค่า PC3 ตลอดเวลา (ใช้ทดสอบ sensor)</td></tr>
+      <tr><td><code>homed</code></td><td>uint8</td><td>1 = homing เสร็จ. Set=1 เพื่อทดสอบ P2P ไม่ต้องมี sensor</td></tr>
+      <tr><td><code>cumulative_angle_deg</code></td><td>float</td><td>มุมสะสมจาก home (องศา)</td></tr>
+      <tr><td><code>ss_error_deg</code></td><td>float</td><td>Position steady-state error (deg) — อ่านอย่างเดียว</td></tr>
       <tr><td><code>dev_dash.Auto.target_deg</code></td><td>float</td><td>Target position (degrees)</td></tr>
-      <tr><td><code>dev_dash.Auto.start_move</code></td><td>uint8</td><td>Set 1 → trigger move</td></tr>
-      <tr><td><code>cumulative_angle_deg</code></td><td>float</td><td>Total rotation from home</td></tr>
-      <tr><td><code>homed</code></td><td>uint8</td><td>1 = homing completed</td></tr>
-      <tr><td><code>enable_telemetry</code></td><td>uint8</td><td>Set 1 ถ้าใช้ Python GUI (ปิด Modbus mode)</td></tr>
-      <tr><td><code>seq_delay_s</code></td><td>float</td><td>Sequence step delay (s)</td></tr>
-      <tr><td><code>fine_tune_speed</code></td><td>float</td><td>DPAD fine-tune speed fraction</td></tr>
-      <tr><td><code>current_state</code></td><td>enum</td><td>Current robot state</td></tr>
+      <tr><td><code>dev_dash.Auto.start_move</code></td><td>uint8</td><td>Set 1 → trigger P2P move</td></tr>
+      <tr><td><code>dev_dash.Auto.set_home</code></td><td>uint8</td><td>Set 1 → zero encoder + homed=1</td></tr>
+      <tr><td><code>dev_dash.Ctrl.mode</code></td><td>0–3</td><td>0=Production, 1=HW Test, 2=Joy Test, 3=Auto Motor</td></tr>
     </table>
 
     <div class="alert alert-warn">
@@ -719,9 +746,9 @@ pos, vel, acc, pos_ref, vel_ref = struct.<span class="fn">unpack_from</span>(<sp
       <tr><th>Signal</th><th>Phase 1 (NUCLEO)</th><th>Phase 2 (PCB)</th><th>เหตุผล</th></tr>
       <tr>
         <td>HOME_SENSOR</td>
-        <td class="pin">PB6</td>
-        <td><span class="pin">PC5</span> <span class="new-pcb">PCB</span></td>
-        <td>PCB routing ดีกว่า</td>
+        <td class="pin">PC3 (Phase 1 แก้แล้ว)</td>
+        <td><span class="pin">PC3</span></td>
+        <td>ใช้ PC3 ทั้ง Phase 1 และ 2 — ไม่เปลี่ยน</td>
       </tr>
       <tr>
         <td>Motor PWM</td>
@@ -818,7 +845,7 @@ pos, vel, acc, pos_ref, vel_ref = struct.<span class="fn">unpack_from</span>(<sp
     </div>
     <table>
       <tr><th>Signal</th><th>Old Pin</th><th>New Pin</th><th>AF / Config</th></tr>
-      <tr><td>HOME_SENSOR</td><td class="pin">PB6</td><td class="pin">PC5</td><td>GPIO_INPUT, PULLDOWN</td></tr>
+      <tr><td>HOME_SENSOR</td><td class="pin">PC3</td><td class="pin">PC3</td><td>ไม่เปลี่ยน — GPIO_INPUT, PULLUP, EXTI3</td></tr>
       <tr><td>Motor PWM</td><td class="pin">PA6 TIM3_CH1</td><td class="pin">PC9 TIM3_CH4</td><td>AF2, PWM mode 1</td></tr>
       <tr><td>TOWER_G</td><td class="pin">PC7</td><td class="pin">PB12</td><td>GPIO_OUTPUT_PP</td></tr>
       <tr><td>POWER_BTN</td><td class="pin">PB10</td><td class="pin">PB2</td><td>GPIO_INPUT, PULLUP</td></tr>
@@ -887,7 +914,7 @@ pos, vel, acc, pos_ref, vel_ref = struct.<span class="fn">unpack_from</span>(<sp
       <li>
         <div class="step-body">
           <h4>ทดสอบ Motor PWM</h4>
-          <p>Set <code>dev_dash.Ctrl.force_motor_speed=0.1</code> (mode=1). ตรวจทิศหมุน. ถ้าสวน → set <code>dev_dash.Auto.motor_invert=1</code>.</p>
+          <p>Set <code>dev_dash.Test.force_motor_speed=0.1</code> (mode=1). ตรวจทิศหมุน. ถ้าสวน → set <code>motor_dir_inverted=1</code> ใน Live Expressions.</p>
         </div>
       </li>
       <li>
