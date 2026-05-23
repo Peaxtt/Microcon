@@ -180,136 +180,131 @@ typedef enum {
   SYS_MODE_AUTO_MOTOR_TEST = 3
 } SystemMode_t;
 
-typedef struct {
-  SystemMode_t mode;          // SYS_MODE_PRODUCTION (normal) or test modes
-  float    ramp_rate;         // motor speed slew rate per 10ms (0.01=slow, 0.1=fast)
-  float    max_speed;         // motor speed hard cap 0.0–1.0
-  float    cur_zero_v;        // WCS1800 zero-current voltage (calibrated at boot)
-  float    cur_sens;          // WCS1800 sensitivity V/A (0.066)
-  uint8_t  telemetry_mode;    // 0=Modbus, 1=Simulink telemetry via LPUART1
-  float    acc_alpha;         // velocity filter alpha (0.1=smooth, 1.0=raw)
-} DashCtrl_t;
+/* =========================================================================
+ * DevDashboard — 6 sub-structs, expand โฟลเดอร์ที่ต้องการเลย
+ *   Cmd    → คำสั่ง P2P (เขียน)
+ *   Status → สถานะ real-time (อ่าน)
+ *   Traj   → Trajectory parameters (แก้ได้)
+ *   Sys    → System config + motor settings
+ *   IO     → Raw GPIO + Joystick (อ่าน)
+ *   Test   → HW/Motor test overrides (mode=1,3 เท่านั้น)
+ * ========================================================================= */
 
-// ── Test mode overrides (only used in HW_TEST / MOTOR_TEST modes) ──────────
+// ── Cmd: คำสั่ง P2P ──────────────────────────────────────────────────────────
 typedef struct {
+  float    target_deg;    // เป้าหมาย (degrees จาก home)
+  uint8_t  start_move;    // Set 1 → สั่ง move (auto-clear)
+  uint8_t  set_home;      // Set 1 → zero encoder + homed=1 (auto-clear)
+  uint8_t  cancel_move;   // Set 1 → stop ทันที (auto-clear)
+} DashCmd_t;
+
+// ── Status: สถานะ real-time (อ่าน) ──────────────────────────────────────────
+typedef struct {
+  float        pos_deg;       // ตำแหน่ง (degrees)
+  float        pos_rad;       // ตำแหน่ง (rad)
+  float        vel_rad_s;     // ความเร็ว (rad/s)
+  float        acc_rad_s2;    // ความเร่ง (rad/s²)
+  float        pos_ideal;     // trajectory reference pos (rad)
+  float        vel_ideal;     // trajectory reference vel (rad/s)
+  float        pos_err;       // position error (rad)
+  float        vel_sp;        // velocity setpoint (rad/s)
+  float        pwm_out;       // final motor command -1..+1
+  uint8_t      traj_active;   // 1 = trajectory กำลังทำงาน
+  float        current_A;     // กระแสมอเตอร์ (A)
+  int32_t      encoder_raw;   // encoder counts
+  float        motor_cmd;     // motor speed command
+  RobotState_t state;         // current state
+} DashStatus_t;
+
+// ── Traj: Trajectory parameters ──────────────────────────────────────────────
+typedef struct {
+  uint8_t  traj_type;     // 0=Trapezoid  1=S-Curve  2=Direct
+  uint8_t  time_mode;     // 0=constraint-based  1=time-based
+  float    v_max;         // rad/s
+  float    a_max;         // rad/s²
+  float    j_max;         // rad/s³ (S-Curve เท่านั้น)
+  float    t_acc_seg;     // accel duration (s, time_mode=1)
+  float    t_cruise_seg;  // cruise duration (s, time_mode=1)
+  float    t1_seg;        // S-Curve jerk seg (s)
+  float    t2_seg;        // S-Curve const-accel seg (s)
+} DashTraj_t;
+
+// ── Sys: System config + motor settings ──────────────────────────────────────
+typedef struct {
+  SystemMode_t mode;          // 0=Production 1=HW_Test 2=Joy_Test 3=Motor_Test
+  float    max_speed;         // motor speed cap 0.0–1.0
+  float    ramp_rate;         // slew rate per 10ms (0.01=ช้า, 0.1=เร็ว)
+  float    acc_alpha;         // velocity filter alpha (0.1=smooth, 1.0=raw)
+  float    cur_zero_v;        // current sensor zero V (auto-cal at boot)
+  float    cur_sens;          // current sensor sensitivity V/A (0.066)
+  uint8_t  telemetry_mode;    // 0=Modbus  1=Simulink via LPUART1
+} DashSys_t;
+
+// ── IO: Raw GPIO + Joystick (อ่าน) ───────────────────────────────────────────
+typedef struct {
+  uint8_t  in_estop;       // ESTOP pin
+  uint8_t  in_mode;        // MODE switch
+  uint8_t  in_reset;       // RESET button
+  uint8_t  in_power;       // POWER button
+  uint8_t  out_pwm;        // PWM active
+  uint8_t  out_dir;        // motor direction
+  uint8_t  out_pneumatic;
+  uint8_t  out_gripper;
+  uint8_t  out_tower_g;
+  uint8_t  out_tower_y;
+  uint8_t  out_tower_r;
+  uint8_t  out_reset_led;
+  uint8_t  out_emer;
+  uint8_t  joy_connected;  // 1 = joystick เชื่อมต่อ
+  float    joy_ly;         // Left Stick Y
+  float    joy_lt;         // Left Trigger
+  float    joy_rt;         // Right Trigger
+  uint16_t joy_buttons;    // raw bitmask
+} DashIO_t;
+
+// ── Test: HW/Motor test overrides (mode=1 or 3 เท่านั้น) ────────────────────
+typedef struct {
+  float    force_motor;
   uint8_t  force_pneumatic;
   uint8_t  force_gripper;
-  uint8_t  force_tower_green;
-  uint8_t  force_tower_yellow;
-  uint8_t  force_tower_red;
-  uint8_t  force_emer_out;
-  float    force_motor_speed;
-  float    auto_speed;         // AUTO_MOTOR_TEST speed 0.0–1.0
-  uint16_t auto_period_fwd_ms; // AUTO_MOTOR_TEST forward time (ms)
-  uint16_t auto_period_rev_ms; // AUTO_MOTOR_TEST reverse time (ms)
+  uint8_t  force_tower_g;
+  uint8_t  force_tower_y;
+  uint8_t  force_tower_r;
+  uint8_t  force_emer;
+  float    test_speed;
+  uint16_t test_period_fwd_ms;
+  uint16_t test_period_rev_ms;
 } DashTest_t;
 
 typedef struct {
-  uint8_t  connected;
-  uint16_t raw_buttons;
-  float    L_Y;
-  float    R_T;
-  float    L_T;
-} DashJoy_t;
-
-typedef struct {
-  RobotState_t state;
-  float    motor_cmd;
-  int32_t  encoder;
-  float    current_A;
-  // Telemetry values (ค่าที่ส่งออก UART ไป Simulink)
-  float    pos_rad;    // position (rad)
-  float    pos_deg;
-  float    vel_rad_s;  // velocity (rad/s)
-  float    acc_rad_s2; // acceleration (rad/s²)
-} DashStatus_t;
-
-typedef struct {
-  uint8_t  estop;
-  uint8_t  mode_switch;
-  uint8_t  reset;
-  uint8_t  power;
-} DashIn_t;
-
-typedef struct {
-  uint8_t  pwm;
-  uint8_t  dir;
-  uint8_t  pneumatic;
-  uint8_t  gripper;
-  uint8_t  tower_g;
-  uint8_t  tower_y;
-  uint8_t  tower_r;
-  uint8_t  reset_led;
-  uint8_t  emer;
-  uint8_t  telemetry_active; // mirror of Ctrl.telemetry_mode สำหรับดูใน Status
-} DashOut_t;
-
-// Auto Control Dashboard (STATE_AUTO tuning via Live Expressions)
-typedef struct {
-  // --- COMMANDS (write these) ---
-  float    target_deg;    // absolute target position (degrees from home)
-  uint8_t  start_move;     // set 1 to trigger move, auto-clears
-  uint8_t  cancel_move;    // set 1 to stop immediately → STATE_EMER, auto-clears
-  uint8_t  set_home;       // set 1 to mark current pos as home (0°), auto-clears
-  uint8_t  traj_type;    // 0=Trapezoid, 1=S-Curve
-  uint8_t  time_mode;    // 0=constraint-based, 1=time-based
-  // Trajectory constraints (time_mode=0)
-  float    v_max;        // max velocity (rad/s)
-  float    a_max;        // max acceleration (rad/s²)
-  float    j_max;        // max jerk (rad/s³), S-Curve only
-  // Trajectory times (time_mode=1)
-  float    t1_seg;       // S-Curve: jerk duration (s)
-  float    t2_seg;       // S-Curve: const-accel duration (s)
-  float    t_acc_seg;    // Trapezoid: accel duration (s)
-  float    t_cruise_seg; // cruise duration (s)
-  // --- STATUS (read these) ---
-  float    pos_rad;      // current position (rad)
-  float    vel_rad_s;    // current velocity (rad/s)
-  float    pos_ideal;    // trajectory reference (rad)
-  float    vel_ideal;    // trajectory velocity reference (rad/s)
-  float    pos_err;      // position error (rad)
-  float    vel_sp;       // velocity setpoint from pos loop (rad/s)
-  float    pwm_out;      // final motor command (-1.0 to 1.0)
-  uint8_t  traj_active;  // 1 while trajectory is running
-} DashAuto_t;
-
-typedef struct {
-  DashCtrl_t   Ctrl;    // system mode & production settings
-  DashAuto_t   Auto;    // P2P commands + live status
-  DashStatus_t Status;  // live telemetry (read-only)
-  DashIn_t     In;      // raw GPIO inputs
-  DashOut_t    Out;     // raw GPIO outputs
-  DashTest_t   Test;    // HW/motor test overrides (test modes only)
-  DashJoy_t    Joy;     // joystick state
+  DashCmd_t    Cmd;     // คำสั่ง P2P (เขียน)
+  DashStatus_t Status;  // สถานะ real-time (อ่าน)
+  DashTraj_t   Traj;    // Trajectory params
+  DashSys_t    Sys;     // System config
+  DashIO_t     IO;      // Raw GPIO + Joystick
+  DashTest_t   Test;    // Test mode overrides
 } DevDashboard_t;
 
 DevDashboard_t dev_dash = {
-  .Ctrl.mode          = SYS_MODE_PRODUCTION,
-  .Ctrl.ramp_rate     = 0.05f,
-  .Ctrl.max_speed     = 0.40f,
-  .Ctrl.auto_speed         = 0.30f,
-  .Ctrl.auto_period_fwd_ms = 1000,
-  .Ctrl.auto_period_rev_ms = 1000,
-  .Ctrl.cur_zero_v      = 2.46f,
-  .Ctrl.cur_sens        = 0.066f,
-  .Ctrl.telemetry_mode  = 0,   // 0=Modbus, 1=Simulink via USB
-  .Ctrl.acc_alpha       = 0.2f, // acceleration LPF (0.1=smooth, 0.5=fast)
-  // Auto control defaults
-  .Auto.target_deg    = 0.0f,
-  .Auto.traj_type     = 0,       // 0=Trapezoid
-  .Auto.time_mode     = 0,       // 0=constraint-based
-  .Auto.v_max         = 6.28f,
-  .Auto.a_max         = 12.56f,  // control team
-  .Auto.j_max         = 10.0f,
-  .Auto.t1_seg        = 0.1f,
-  .Auto.t2_seg        = 0.1f,
-  .Auto.t_acc_seg     = 0.3f,    // control team
-  .Auto.t_cruise_seg  = 0.2f,
-  // PID gains: edit kp_vel / ki_vel / kp_pos etc. in pid_control.c or Live Expressions
-  // Test mode defaults
-  .Test.auto_speed         = 0.30f,
-  .Test.auto_period_fwd_ms = 1000,
-  .Test.auto_period_rev_ms = 1000,
+  .Sys.mode          = SYS_MODE_PRODUCTION,
+  .Sys.ramp_rate     = 0.05f,
+  .Sys.max_speed     = 0.40f,
+  .Sys.cur_zero_v    = 2.46f,
+  .Sys.cur_sens      = 0.066f,
+  .Sys.telemetry_mode = 0,
+  .Sys.acc_alpha     = 0.2f,
+  .Traj.traj_type    = 0,
+  .Traj.time_mode    = 0,
+  .Traj.v_max        = 6.28f,
+  .Traj.a_max        = 12.56f,
+  .Traj.j_max        = 10.0f,
+  .Traj.t1_seg       = 0.1f,
+  .Traj.t2_seg       = 0.1f,
+  .Traj.t_acc_seg    = 0.3f,
+  .Traj.t_cruise_seg = 0.2f,
+  .Test.test_speed         = 0.30f,
+  .Test.test_period_fwd_ms = 1000,
+  .Test.test_period_rev_ms = 1000,
 };
 
 /* USER CODE END PV */
@@ -394,7 +389,7 @@ static void finish_homing(void) {
 }
 
 // Start a trajectory move to target_deg (degrees) from current encoder position.
-// Selects Trapezoid or S-Curve based on dev_dash.Auto.traj_type.
+// Selects Trapezoid or S-Curve based on dev_dash.Traj.traj_type.
 // Returns 0 if rejected by soft limit, 1 if started.
 static void start_move_deg(float deg)
 {
@@ -408,20 +403,20 @@ static void start_move_deg(float deg)
   ctrl_traj_start    = pos_now;
   float disp         = target_rad - pos_now;
 
-  g_scurve.v_max    = dev_dash.Auto.v_max;
-  g_scurve.a_max    = dev_dash.Auto.a_max;
-  g_scurve.j_max    = dev_dash.Auto.j_max;
-  g_trapezoid.v_max = dev_dash.Auto.v_max;
-  g_trapezoid.a_max = dev_dash.Auto.a_max;
+  g_scurve.v_max    = dev_dash.Traj.v_max;
+  g_scurve.a_max    = dev_dash.Traj.a_max;
+  g_scurve.j_max    = dev_dash.Traj.j_max;
+  g_trapezoid.v_max = dev_dash.Traj.v_max;
+  g_trapezoid.a_max = dev_dash.Traj.a_max;
 
-  if (dev_dash.Auto.traj_type == 0) {
-    if (dev_dash.Auto.time_mode)
-      Trapezoid_SetTarget_ByTime(&g_trapezoid, disp, dev_dash.Auto.t_acc_seg, dev_dash.Auto.t_cruise_seg);
+  if (dev_dash.Traj.traj_type == 0) {
+    if (dev_dash.Traj.time_mode)
+      Trapezoid_SetTarget_ByTime(&g_trapezoid, disp, dev_dash.Traj.t_acc_seg, dev_dash.Traj.t_cruise_seg);
     else
       Trapezoid_SetTarget(&g_trapezoid, disp);
-  } else if (dev_dash.Auto.traj_type == 1) {
-    if (dev_dash.Auto.time_mode)
-      SCurve_SetTarget_ByTime(&g_scurve, disp, dev_dash.Auto.t1_seg, dev_dash.Auto.t2_seg, dev_dash.Auto.t_cruise_seg);
+  } else if (dev_dash.Traj.traj_type == 1) {
+    if (dev_dash.Traj.time_mode)
+      SCurve_SetTarget_ByTime(&g_scurve, disp, dev_dash.Traj.t1_seg, dev_dash.Traj.t2_seg, dev_dash.Traj.t_cruise_seg);
     else
       SCurve_SetTarget(&g_scurve, disp);
   }
@@ -548,14 +543,14 @@ int main(void)
         }
         HAL_Delay(2); // รอ 2ms
     }
-    dev_dash.Ctrl.cur_zero_v = sum_voltage / 100.0f; // ตั้งค่า Zero แบบ Real-time
+    dev_dash.Sys.cur_zero_v = sum_voltage / 100.0f; // ตั้งค่า Zero แบบ Real-time
     // =======================================================
 
   printf("\r\n=== 1-DOF Robot System Ready ===\r\n");
 
   // Init trajectory generators (dt=0.001s for 1kHz ISR)
-  Trapezoid_Init(&g_trapezoid, dev_dash.Auto.v_max, dev_dash.Auto.a_max, 0.001f);
-  SCurve_Init(&g_scurve, dev_dash.Auto.v_max, dev_dash.Auto.a_max, dev_dash.Auto.j_max, 0.001f);
+  Trapezoid_Init(&g_trapezoid, dev_dash.Traj.v_max, dev_dash.Traj.a_max, 0.001f);
+  SCurve_Init(&g_scurve, dev_dash.Traj.v_max, dev_dash.Traj.a_max, dev_dash.Traj.j_max, 0.001f);
 
   // Reference Feedforward — exact control team parameters
   RefFF_Init(&my_refff,
@@ -628,7 +623,7 @@ int main(void)
                 float v = (filtered_adc / 4095.0f) * 3.3f;
 
                 // คำนวณกระแส โดยใช้ cur_zero_v ที่ได้จากการ Calibrate ตัวเองตอนเปิดเครื่อง
-                float i_a = (v - dev_dash.Ctrl.cur_zero_v) / dev_dash.Ctrl.cur_sens;
+                float i_a = (v - dev_dash.Sys.cur_zero_v) / dev_dash.Sys.cur_sens;
 
                 if (i_a < 0.0f) i_a = -i_a; // ทำให้กระแสเป็นบวกเสมอ
                 current_sensor_A = i_a;
@@ -646,12 +641,12 @@ int main(void)
       static uint8_t python_step_active = 0;
       int16_t step_cmd = (int16_t)mb_slave.registers[10];
       if (step_cmd != 0) {
-        dev_dash.Ctrl.mode = SYS_MODE_HARDWARE_TEST;
-        dev_dash.Test.force_motor_speed = (float)step_cmd / 10000.0f; 
+        dev_dash.Sys.mode = SYS_MODE_HARDWARE_TEST;
+        dev_dash.Test.force_motor = (float)step_cmd / 10000.0f; 
         python_step_active = 1;
       } else if (python_step_active) {
-        dev_dash.Ctrl.mode = SYS_MODE_PRODUCTION;
-        dev_dash.Test.force_motor_speed = 0.0f;
+        dev_dash.Sys.mode = SYS_MODE_PRODUCTION;
+        dev_dash.Test.force_motor = 0.0f;
         python_step_active = 0;
       }
 
@@ -661,20 +656,20 @@ int main(void)
         kd_vel = (float)mb_slave.registers[14] / 100.0f;
         
         float target_rad = (float)((int16_t)mb_slave.registers[11]) / 1000.0f;
-        dev_dash.Auto.target_deg = target_rad * (180.0f / 3.14159265f);
+        dev_dash.Cmd.target_deg = target_rad * (180.0f / 3.14159265f);
         
         // Trajectory overrides (moved to 0x38-0x3F, clear of BaseSystem map)
         if (mb_slave.registers[0x38] <= 2) {
-             dev_dash.Auto.traj_type = (uint8_t)mb_slave.registers[0x38];
+             dev_dash.Traj.traj_type = (uint8_t)mb_slave.registers[0x38];
         }
         if (mb_slave.registers[0x39] > 0) {
-             dev_dash.Auto.v_max = (float)mb_slave.registers[0x39] / 100.0f;
+             dev_dash.Traj.v_max = (float)mb_slave.registers[0x39] / 100.0f;
         }
         if (mb_slave.registers[0x3B] > 0) {
-             dev_dash.Auto.a_max = (float)mb_slave.registers[0x3B] / 100.0f;
+             dev_dash.Traj.a_max = (float)mb_slave.registers[0x3B] / 100.0f;
         }
         if (mb_slave.registers[0x3C] > 0) {
-             dev_dash.Auto.j_max = (float)mb_slave.registers[0x3C] / 100.0f;
+             dev_dash.Traj.j_max = (float)mb_slave.registers[0x3C] / 100.0f;
         }
         if (mb_slave.registers[0x3D] > 0) {
              kp_pos = (float)mb_slave.registers[0x3D] / 100.0f;
@@ -682,7 +677,7 @@ int main(void)
         kd_pos = (float)mb_slave.registers[0x3E] / 100.0f;
         ki_pos = (float)mb_slave.registers[0x3F] / 100.0f;
 
-        dev_dash.Auto.start_move = 1;
+        dev_dash.Cmd.start_move = 1;
         
         // Force the State Machine to AUTO so it actually executes the move!
         if (current_state != STATE_EMER) {
@@ -694,7 +689,7 @@ int main(void)
 
       // Reg 21: Set Home
       if (mb_slave.registers[21] == 1) {
-        dev_dash.Auto.set_home = 1;
+        dev_dash.Cmd.set_home = 1;
         mb_slave.registers[21] = 0;
       }
 
@@ -712,8 +707,8 @@ int main(void)
         float hold = my_encoder.position_rad;
         ctrl_direct_target    = hold;
         ctrl_traj_start       = hold;
-        dev_dash.Auto.target_deg = hold * (180.0f / 3.14159f);
-        dev_dash.Auto.start_move = 0;
+        dev_dash.Cmd.target_deg = hold * (180.0f / 3.14159f);
+        dev_dash.Cmd.start_move = 0;
       }
 
       // 3. Update Status Registers (0x26 - 0x31)
@@ -750,7 +745,7 @@ int main(void)
       GPIO_PinState current_mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
       if (current_mode_switch != last_mode_switch) {
         if (current_state != STATE_EMER && current_state != STATE_SEQUENCE &&
-            current_state != STATE_TEST && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+            current_state != STATE_TEST && dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
           current_state = (current_mode_switch == GPIO_PIN_RESET) ? STATE_AUTO : STATE_IDLE;
         }
         last_mode_switch = current_mode_switch;
@@ -777,8 +772,8 @@ int main(void)
         }
         if (emer_rel_cnt >= 5) {
           emer_rel_cnt = 0;
-          dev_dash.Auto.start_move  = 0;
-          dev_dash.Auto.cancel_move = 0;
+          dev_dash.Cmd.start_move  = 0;
+          dev_dash.Cmd.cancel_move = 0;
           g_trapezoid.is_active     = 0;
           g_scurve.is_active        = 0;
           ctrl_vel_integral         = 0.0f;
@@ -786,13 +781,13 @@ int main(void)
           float hold_pos = current_position * RAD_PER_CNT;
           ctrl_direct_target        = hold_pos;
           ctrl_traj_start           = hold_pos;
-          dev_dash.Auto.target_deg  = hold_pos * (180.0f / 3.14159f);
+          dev_dash.Cmd.target_deg  = hold_pos * (180.0f / 3.14159f);
           mb_slave.registers[0x24]  = 0;
           mb_slave.registers[0x01]  = 0;
           HAL_GPIO_WritePin(TOWER_R_GPIO_Port,     TOWER_R_Pin,     GPIO_PIN_RESET);
           HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_RESET);
-          if (dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+          if (dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
             GPIO_PinState mode_now = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
             current_state = (mode_now == GPIO_PIN_RESET) ? STATE_AUTO : STATE_MANUAL;
           } else {
@@ -804,13 +799,13 @@ int main(void)
       // ── SET HOME: ทุกโหมด ทุก state (RT + Y หรือ set_home=1) ─────────────────
       if (!emer_active) {
         if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_RB)) {
-          dev_dash.Auto.set_home = 1;
+          dev_dash.Cmd.set_home = 1;
         }
-        if (dev_dash.Auto.set_home) {
+        if (dev_dash.Cmd.set_home) {
           // Zero PWM immediately BEFORE disabling IRQ (hardware register — instant)
           __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
           __disable_irq();
-          dev_dash.Auto.set_home       = 0;
+          dev_dash.Cmd.set_home       = 0;
           enc_reset_pending            = 1;
           // Hold current position as target so PID sees zero error after reset
           float cur_rad                = my_encoder.position_rad;
@@ -825,9 +820,9 @@ int main(void)
           g_scurve.p_current           = 0.0f;
           g_scurve.v_current           = 0.0f;
           motor_speed_cmd              = 0.0f;
-          dev_dash.Auto.target_deg     = 0.0f;
-          dev_dash.Auto.start_move     = 0;
-          dev_dash.Auto.pos_err        = 0.0f;
+          dev_dash.Cmd.target_deg     = 0.0f;
+          dev_dash.Cmd.start_move     = 0;
+          dev_dash.Status.pos_err        = 0.0f;
           vel_filtered                 = 0.0f;
           __enable_irq();
           homed           = 1;
@@ -841,7 +836,7 @@ int main(void)
       // 4. System Mode Selector — ข้ามเมื่อ EMER active
       if (!emer_active) {
 
-      if (dev_dash.Ctrl.mode == SYS_MODE_HARDWARE_TEST) {
+      if (dev_dash.Sys.mode == SYS_MODE_HARDWARE_TEST) {
         
         // --- HARDWARE TEST UI MODE ---
         // Bypass State Machine and Modbus commands completely.
@@ -849,13 +844,13 @@ int main(void)
         
         HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, dev_dash.Test.force_pneumatic ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, dev_dash.Test.force_gripper ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Test.force_tower_green ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Test.force_tower_yellow ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Test.force_tower_red ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Test.force_emer_out ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Test.force_tower_g ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Test.force_tower_y ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Test.force_tower_r ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Test.force_emer ? GPIO_PIN_SET : GPIO_PIN_RESET);
         
         // Apply Forced Motor Speed
-        safe_speed = dev_dash.Test.force_motor_speed;
+        safe_speed = dev_dash.Test.force_motor;
         if (safe_speed > 1.0f) safe_speed = 1.0f;
         if (safe_speed < -1.0f) safe_speed = -1.0f;
         
@@ -867,7 +862,7 @@ int main(void)
         }
         __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
 
-      } else if (dev_dash.Ctrl.mode == SYS_MODE_JOYSTICK_TEST) {
+      } else if (dev_dash.Sys.mode == SYS_MODE_JOYSTICK_TEST) {
 
         // --- JOYSTICK HARDWARE TEST MODE ---
         // Bypass State Machine. Map joystick buttons directly to physical pins for fast testing.
@@ -994,9 +989,9 @@ int main(void)
           } else {
             // Normal: RT + Left-stick Y with ramp
             float joy_raw = (joy_rt_f() > 0.5f) ? joy_ly_f() : 0.0f;
-            float joy_target = (joy_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
-                               (joy_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : joy_raw;
-            float ramp_rate_local = dev_dash.Ctrl.ramp_rate;
+            float joy_target = (joy_raw >  dev_dash.Sys.max_speed) ?  dev_dash.Sys.max_speed :
+                               (joy_raw < -dev_dash.Sys.max_speed) ? -dev_dash.Sys.max_speed : joy_raw;
+            float ramp_rate_local = dev_dash.Sys.ramp_rate;
             if ((joy_target > 0.0f && joy_ramp < 0.0f) ||
                 (joy_target < 0.0f && joy_ramp > 0.0f)) {
               joy_dead_cnt = 5;
@@ -1025,7 +1020,7 @@ int main(void)
           HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET);
         }
 
-      } else if (dev_dash.Ctrl.mode == SYS_MODE_AUTO_MOTOR_TEST) {
+      } else if (dev_dash.Sys.mode == SYS_MODE_AUTO_MOTOR_TEST) {
 
         // --- AUTO MOTOR TEST MODE ---
         static uint16_t auto_test_timer = 0;
@@ -1033,8 +1028,8 @@ int main(void)
         static float    auto_ramp       = 0.0f;
         static uint8_t  auto_dead_cnt   = 0;
 
-        uint16_t cur_period_ms = auto_test_dir ? dev_dash.Test.auto_period_fwd_ms
-                                                : dev_dash.Test.auto_period_rev_ms;
+        uint16_t cur_period_ms = auto_test_dir ? dev_dash.Test.test_period_fwd_ms
+                                                : dev_dash.Test.test_period_rev_ms;
         uint16_t half_period = (cur_period_ms / 10);
         if (half_period < 1) half_period = 1;
         auto_test_timer++;
@@ -1043,13 +1038,13 @@ int main(void)
           auto_test_dir = !auto_test_dir;
           auto_dead_cnt = 5; // dead-time 50ms ก่อนสลับทิศ
         }
-        float auto_target = dev_dash.Test.auto_speed;
-        if (auto_target > dev_dash.Ctrl.max_speed) auto_target = dev_dash.Ctrl.max_speed;
+        float auto_target = dev_dash.Test.test_speed;
+        if (auto_target > dev_dash.Sys.max_speed) auto_target = dev_dash.Sys.max_speed;
         if (auto_target < 0.0f) auto_target = 0.0f;
 
         if (auto_dead_cnt > 0) { auto_ramp = 0.0f; auto_dead_cnt--; }
-        else if (auto_target > auto_ramp + dev_dash.Ctrl.ramp_rate) auto_ramp += dev_dash.Ctrl.ramp_rate;
-        else if (auto_target < auto_ramp - dev_dash.Ctrl.ramp_rate) auto_ramp -= dev_dash.Ctrl.ramp_rate;
+        else if (auto_target > auto_ramp + dev_dash.Sys.ramp_rate) auto_ramp += dev_dash.Sys.ramp_rate;
+        else if (auto_target < auto_ramp - dev_dash.Sys.ramp_rate) auto_ramp -= dev_dash.Sys.ramp_rate;
         else                                                          auto_ramp  = auto_target;
 
         safe_speed = auto_ramp;
@@ -1079,9 +1074,9 @@ int main(void)
           g_scurve.is_active    = 0;
           g_scurve.p_current    = 0.0f;
           g_scurve.v_current    = 0.0f;
-          if (!dev_dash.Auto.start_move)
-            dev_dash.Auto.target_deg = pos_now * (180.0f / 3.14159f);
-          dev_dash.Auto.pos_err = 0.0f;
+          if (!dev_dash.Cmd.start_move)
+            dev_dash.Cmd.target_deg = pos_now * (180.0f / 3.14159f);
+          dev_dash.Status.pos_err = 0.0f;
         }
         prev_state = current_state;
 
@@ -1089,8 +1084,8 @@ int main(void)
         if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_B)) {
           if (current_state == STATE_IDLE || current_state == STATE_MANUAL ||
               current_state == STATE_AUTO) {
-            dev_dash.Auto.target_deg = 0.0f;
-            dev_dash.Auto.start_move = 1;
+            dev_dash.Cmd.target_deg = 0.0f;
+            dev_dash.Cmd.start_move = 1;
             current_state = STATE_AUTO; // สลับมา AUTO ถ้ายังไม่ได้อยู่
           }
         }
@@ -1098,8 +1093,8 @@ int main(void)
         // ── Global Commands (ทำงานทุก state) ─────────────────────────────────
 
         // Cancel / Emergency Stop — หยุดทันที + STATE_EMER + ต้องกด RESET ถึงสั่งใหม่ได้
-        if (dev_dash.Auto.cancel_move) {
-          dev_dash.Auto.cancel_move = 0;
+        if (dev_dash.Cmd.cancel_move) {
+          dev_dash.Cmd.cancel_move = 0;
           g_trapezoid.is_active     = 0;
           g_scurve.is_active        = 0;
           ctrl_vel_integral         = 0.0f;
@@ -1141,7 +1136,7 @@ int main(void)
               if (homed) { current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
               mb_slave.registers[0x01] = 0;
             }
-            else if (mb_slave.registers[0x01] & 0x08) { dev_dash.Auto.set_home = 1; mb_slave.registers[0x01] = 0; }
+            else if (mb_slave.registers[0x01] & 0x08) { dev_dash.Cmd.set_home = 1; mb_slave.registers[0x01] = 0; }
             else if (mb_slave.registers[0x01] & 0x10) {
               if (homed) { current_state = STATE_TEST; test_state = TEST_GOING_END; test_mv_armed = 1; test_repeat = (int16_t)mb_slave.registers[0x11]; }
               mb_slave.registers[0x01] = 0;
@@ -1214,9 +1209,9 @@ int main(void)
                 ctrl_direct_target = pos_now + jog_rad;
                 ctrl_vel_integral  = 0.0f;
                 ctrl_pos_integral  = 0.0f;
-                g_scurve.v_max = dev_dash.Auto.v_max;
-                g_scurve.a_max = dev_dash.Auto.a_max;
-                g_scurve.j_max = dev_dash.Auto.j_max;
+                g_scurve.v_max = dev_dash.Traj.v_max;
+                g_scurve.a_max = dev_dash.Traj.a_max;
+                g_scurve.j_max = dev_dash.Traj.j_max;
                 SCurve_SetTarget(&g_scurve, jog_rad);
                 current_state = STATE_AUTO;
                 mb_slave.registers[0x27] = 0x08; // Go Point
@@ -1246,9 +1241,9 @@ int main(void)
             {
               static float last_mb_target = -99999.0f;
               float mb_target_deg = (float)(int16_t)mb_slave.registers[0x24];
-              if (dev_dash.Auto.start_move) {
-                dev_dash.Auto.start_move = 0;
-                start_move_deg(dev_dash.Auto.target_deg);
+              if (dev_dash.Cmd.start_move) {
+                dev_dash.Cmd.start_move = 0;
+                start_move_deg(dev_dash.Cmd.target_deg);
               } else if (mb_target_deg != last_mb_target) {
                 last_mb_target = mb_target_deg;
                 start_move_deg(mb_target_deg);
@@ -1369,8 +1364,8 @@ int main(void)
             float t_end   = (float)(int16_t)mb_slave.registers[0x10];
 
             if (mb_slave.registers[0x06] & 0x01) {
-              dev_dash.Auto.v_max = (float)(int16_t)mb_slave.registers[0x07] * (3.14159265f / 180.0f);
-              dev_dash.Auto.a_max = (float)(int16_t)mb_slave.registers[0x08] * (3.14159265f / 180.0f);
+              dev_dash.Traj.v_max = (float)(int16_t)mb_slave.registers[0x07] * (3.14159265f / 180.0f);
+              dev_dash.Traj.a_max = (float)(int16_t)mb_slave.registers[0x08] * (3.14159265f / 180.0f);
             }
 
             mb_slave.registers[0x27] = 0x08;
@@ -1451,9 +1446,9 @@ int main(void)
           static uint8_t prod_dead_cnt = 0;
           float prod_raw = motor_speed_cmd;
           if (current_state == STATE_EMER) prod_raw = 0.0f;
-          float prod_target = (prod_raw >  dev_dash.Ctrl.max_speed) ?  dev_dash.Ctrl.max_speed :
-                              (prod_raw < -dev_dash.Ctrl.max_speed) ? -dev_dash.Ctrl.max_speed : prod_raw;
-          float prod_ramp_rate_local = dev_dash.Ctrl.ramp_rate;
+          float prod_target = (prod_raw >  dev_dash.Sys.max_speed) ?  dev_dash.Sys.max_speed :
+                              (prod_raw < -dev_dash.Sys.max_speed) ? -dev_dash.Sys.max_speed : prod_raw;
+          float prod_ramp_rate_local = dev_dash.Sys.ramp_rate;
           if ((prod_target > 0.0f && prod_ramp < 0.0f) ||
               (prod_target < 0.0f && prod_ramp > 0.0f)) {
             prod_dead_cnt = 5;
@@ -1480,7 +1475,7 @@ int main(void)
       // ── Tower Light State Machine (industrial-style, 100Hz tick) ───────────
       // Drives G/Y/R based on system state. Non-test modes only.
       // Test modes (HW_TEST, JOY_TEST, AUTO_MOTOR) manage their own lights above.
-      if (dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+      if (dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
         static uint8_t tl_tick = 0;
         tl_tick++;
 
@@ -1554,17 +1549,17 @@ int main(void)
       }
 
       // 7. Update Live Expressions Dashboard
-            dev_dash.Joy.connected = joy_is_connected();
-            dev_dash.Joy.raw_buttons   = joy_raw_buttons();
-            dev_dash.Joy.L_Y       = joy_ly_f();
-            dev_dash.Joy.R_T       = joy_rt_f();
-            dev_dash.Joy.L_T       = joy_lt_f();
+            dev_dash.IO.joy_connected = joy_is_connected();
+            dev_dash.IO.joy_buttons   = joy_raw_buttons();
+            dev_dash.IO.joy_ly       = joy_ly_f();
+            dev_dash.IO.joy_rt       = joy_rt_f();
+            dev_dash.IO.joy_lt       = joy_lt_f();
 
             dev_dash.Status.state         = current_state;
             dev_dash.Status.motor_cmd     = (current_state == STATE_AUTO)
                                             ? motor_speed_cmd
                                             : ((HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin) == GPIO_PIN_SET) ? safe_speed : -safe_speed);
-            dev_dash.Status.encoder       = current_position;
+            dev_dash.Status.encoder_raw       = current_position;
             dev_dash.Status.current_A     = current_sensor_A;
             dev_dash.Status.pos_rad       = current_position * RAD_PER_CNT;
             { // pos_deg: 0–360° wrapped (8192 counts = 1 rev)
@@ -1575,21 +1570,21 @@ int main(void)
             dev_dash.Status.vel_rad_s     = ctrl_vel_rad_s;
             dev_dash.Status.acc_rad_s2    = ctrl_acc_rad_s2;
 
-            dev_dash.In.estop      = HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin);
-            dev_dash.In.mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
-            dev_dash.In.reset      = HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin);
-            dev_dash.In.power      = HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin);
+            dev_dash.IO.in_estop      = HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin);
+            dev_dash.IO.in_mode = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
+            dev_dash.IO.in_reset      = HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin);
+            dev_dash.IO.in_power      = HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin);
 
-            dev_dash.Out.pwm       = (safe_speed > 0.0f || safe_speed < 0.0f) ? 1 : 0;
-            dev_dash.Out.dir       = HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin);
-            dev_dash.Out.pneumatic = HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin);
-            dev_dash.Out.gripper   = HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin);
-            dev_dash.Out.tower_g   = HAL_GPIO_ReadPin(TOWER_G_GPIO_Port, TOWER_G_Pin);
-            dev_dash.Out.tower_y   = HAL_GPIO_ReadPin(TOWER_Y_GPIO_Port, TOWER_Y_Pin);
-            dev_dash.Out.tower_r   = HAL_GPIO_ReadPin(TOWER_R_GPIO_Port, TOWER_R_Pin);
-            dev_dash.Out.reset_led       = HAL_GPIO_ReadPin(RESET_LED_GPIO_Port, RESET_LED_Pin);
-            dev_dash.Out.emer            = HAL_GPIO_ReadPin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin);
-            dev_dash.Out.telemetry_active = dev_dash.Ctrl.telemetry_mode;
+            dev_dash.IO.out_pwm       = (safe_speed > 0.0f || safe_speed < 0.0f) ? 1 : 0;
+            dev_dash.IO.out_dir       = HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin);
+            dev_dash.IO.out_pneumatic = HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin);
+            dev_dash.IO.out_gripper   = HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin);
+            dev_dash.IO.out_tower_g   = HAL_GPIO_ReadPin(TOWER_G_GPIO_Port, TOWER_G_Pin);
+            dev_dash.IO.out_tower_y   = HAL_GPIO_ReadPin(TOWER_Y_GPIO_Port, TOWER_Y_Pin);
+            dev_dash.IO.out_tower_r   = HAL_GPIO_ReadPin(TOWER_R_GPIO_Port, TOWER_R_Pin);
+            dev_dash.IO.out_reset_led       = HAL_GPIO_ReadPin(RESET_LED_GPIO_Port, RESET_LED_Pin);
+            dev_dash.IO.out_emer            = HAL_GPIO_ReadPin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin);
+            dev_dash.Sys.telemetry_mode = dev_dash.Sys.telemetry_mode;
 
       // Send telemetry @ 50Hz (ทุก 2 รอบ) — 19200 baud/16 bytes ≈ 9ms ต้องการ gap ≥ 20ms
       static uint8_t telem_div = 0;
@@ -2163,8 +2158,8 @@ static void Send_Telemetry(void)
   float pos     = (float)(current_position) * RAD_PER_CNT;
   float vel     = (float)ctrl_vel_rad_s;
   float acc     = (float)ctrl_acc_rad_s2;
-  float pos_ref = dev_dash.Auto.pos_ideal;
-  float vel_ref = dev_dash.Auto.vel_ideal;
+  float pos_ref = dev_dash.Status.pos_ideal;
+  float vel_ref = dev_dash.Status.vel_ideal;
 
   buf[0]  = 0x7E;
   buf[1]  = 0x7E;
@@ -2258,7 +2253,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 
     // IIR velocity filter (reduces quantization noise beyond windowing)
-    float vel_alpha = dev_dash.Ctrl.acc_alpha;
+    float vel_alpha = dev_dash.Sys.acc_alpha;
     if (vel_alpha < 0.01f) vel_alpha = 0.01f;
     if (vel_alpha > 1.0f)  vel_alpha = 1.0f;
     vel_filtered   = vel_alpha * my_encoder.velocity_rad_s + (1.0f - vel_alpha) * vel_filtered;
@@ -2273,36 +2268,31 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     // ── AUTO CONTROL @ 1kHz ──────────────────────────────────────────────────
     if ((current_state == STATE_AUTO     || current_state == STATE_SEQUENCE ||
          current_state == STATE_TEST)
-        && dev_dash.Ctrl.mode == SYS_MODE_PRODUCTION) {
+        && dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
 
       // Trajectory reference
-      float ideal_pos, ideal_vel, ideal_acc;
-      if (dev_dash.Auto.traj_type == 2) {
+      float ideal_pos, ideal_vel;
+      if (dev_dash.Traj.traj_type == 2) {
         ideal_pos = ctrl_direct_target;
         ideal_vel = 0.0f;
-        ideal_acc = 0.0f;
-      } else if (dev_dash.Auto.traj_type == 0) {
+      } else if (dev_dash.Traj.traj_type == 0) {
         Trapezoid_Update(&g_trapezoid);
         if (g_trapezoid.is_active) {
           ideal_pos = ctrl_traj_start + g_trapezoid.p_current;
           ideal_vel = g_trapezoid.v_current;
-          ideal_acc = g_trapezoid.a_current;
         } else {
           ideal_pos = ctrl_direct_target;
           ideal_vel = 0.0f;
-          ideal_acc = 0.0f;
-        }
+          }
       } else {
         SCurve_Update(&g_scurve);
         if (g_scurve.is_active) {
           ideal_pos = ctrl_traj_start + g_scurve.p_current;
           ideal_vel = g_scurve.v_current;
-          ideal_acc = g_scurve.a_current;
         } else {
           ideal_pos = ctrl_direct_target;
           ideal_vel = 0.0f;
-          ideal_acc = 0.0f;
-        }
+          }
       }
 
       float pos_rad = my_encoder.position_rad;
@@ -2337,13 +2327,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         }
 
         // Motor direction invert
-        if (motor_dir_inverted || dev_dash.Auto.motor_invert) pwm_pct = -pwm_pct;
+        if (motor_dir_inverted) pwm_pct = -pwm_pct;
         if (pwm_pct >  100.0f) pwm_pct =  100.0f;
         if (pwm_pct < -100.0f) pwm_pct = -100.0f;
 
         // Hard stop when trajectory done and motor settled
-        uint8_t traj_done = (dev_dash.Auto.traj_type == 0) ? (!g_trapezoid.is_active) :
-                            (dev_dash.Auto.traj_type == 1) ? (!g_scurve.is_active)    : 1;
+        uint8_t traj_done = (dev_dash.Traj.traj_type == 0) ? (!g_trapezoid.is_active) :
+                            (dev_dash.Traj.traj_type == 1) ? (!g_scurve.is_active)    : 1;
         if (traj_done && fabsf(pos_err) < 0.035f && fabsf(vel_filtered) < 0.1f) {
           pwm_pct = 0.0f;
           Velocity_PID_Reset();
@@ -2353,8 +2343,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         // Apply PWM: 2% dead zone + min_pwm threshold
         float spd      = pwm_pct / 100.0f;
         float min_frac = min_pwm_pct / 100.0f;
-        if (spd >  dev_dash.Ctrl.max_speed) spd =  dev_dash.Ctrl.max_speed;
-        if (spd < -dev_dash.Ctrl.max_speed) spd = -dev_dash.Ctrl.max_speed;
+        if (spd >  dev_dash.Sys.max_speed) spd =  dev_dash.Sys.max_speed;
+        if (spd < -dev_dash.Sys.max_speed) spd = -dev_dash.Sys.max_speed;
         uint32_t pwm_cnt;
         if (spd > 0.02f) {
           HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_SET);
@@ -2373,15 +2363,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       }
 
       // Update shared status
-      dev_dash.Auto.pos_rad       = pos_rad;
-      dev_dash.Auto.vel_rad_s     = vel_filtered;
-      dev_dash.Auto.pos_ideal     = ideal_pos;
-      dev_dash.Auto.vel_ideal     = ideal_vel;
-      dev_dash.Auto.pos_err       = pos_err;
-      dev_dash.Auto.vel_sp        = vel_sp;
-      dev_dash.Auto.pwm_out       = motor_speed_cmd;
-      dev_dash.Auto.traj_active   = (dev_dash.Auto.traj_type == 0) ? g_trapezoid.is_active :
-                                    (dev_dash.Auto.traj_type == 1) ? g_scurve.is_active    :
+      dev_dash.Status.pos_rad       = pos_rad;
+      dev_dash.Status.vel_rad_s     = vel_filtered;
+      dev_dash.Status.pos_ideal     = ideal_pos;
+      dev_dash.Status.vel_ideal     = ideal_vel;
+      dev_dash.Status.pos_err       = pos_err;
+      dev_dash.Status.vel_sp        = vel_sp;
+      dev_dash.Status.pwm_out       = motor_speed_cmd;
+      dev_dash.Status.traj_active   = (dev_dash.Traj.traj_type == 0) ? g_trapezoid.is_active :
+                                    (dev_dash.Traj.traj_type == 1) ? g_scurve.is_active    :
                                     (fabsf(pos_err) > 0.035f) ? 1 : 0;
     }
     // ── END AUTO CONTROL ─────────────────────────────────────────────────────
