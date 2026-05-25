@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>1-DOF Pin Configurator</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #12141a; color: #ddd; font-family: 'Segoe UI', sans-serif; font-size: 13px; }
+
+/* ── Top bar ── */
+.topbar {
+  background: #1a1d26; border-bottom: 1px solid #2a2d3a;
+  padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.topbar h1 { font-size: 0.95rem; color: #aaa; letter-spacing: 1px; flex: 1; }
+.btn {
+  background: #252836; border: 1px solid #3a3d50; color: #99aacc;
+  border-radius: 4px; padding: 5px 12px; cursor: pointer; font-size: 0.75rem;
+  transition: background .15s;
+}
+.btn:hover { background: #303448; }
+.btn.primary { background: #1e3a5f; border-color: #2a5a9a; color: #88bbff; }
+.btn.primary:hover { background: #264a72; }
+.btn.warn { background: #3a1a00; border-color: #6a3a00; color: #ffaa44; }
+
+/* ── Layout ── */
+.main { display: flex; gap: 0; align-items: flex-start; padding: 12px; }
+
+/* side columns */
+.pin-col { display: flex; flex-direction: column; gap: 3px; min-width: 300px; }
+.pin-col.right { min-width: 300px; }
+
+/* each pin row */
+.pin-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 4px;
+  border-radius: 4px; transition: background .1s;
+}
+.pin-row:hover { background: #1e2030; }
+
+.pin-label {
+  font-weight: 700; font-size: 0.75rem; width: 72px;
+  white-space: nowrap; color: #ccc;
+}
+.pin-col.right .pin-label { text-align: left; }
+.pin-col.left  .pin-label { text-align: right; }
+
+.pin-dot { width: 8px; height: 8px; border-radius: 50%; background: #333; flex-shrink: 0; }
+
+select.func-sel {
+  background: #1a1d26; color: #aaa; border: 1px solid #2a2d3a;
+  border-radius: 4px; padding: 3px 6px; font-size: 0.72rem; width: 100%;
+  cursor: pointer; outline: none; transition: border-color .15s;
+}
+select.func-sel:focus { border-color: #4a6aaa; }
+
+.warn-icon { font-size: 0.75rem; width: 16px; text-align: center; flex-shrink: 0; }
+
+/* PCB body */
+.pcb-body {
+  flex: 1; background: #0c1f0c; border: 2px solid #1a4a1a;
+  border-radius: 8px; margin: 0 8px; min-width: 200px; max-width: 240px;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 10px 8px; gap: 6px; align-self: stretch;
+}
+.pcb-chip {
+  border: 2px dashed #2a5a2a; border-radius: 6px;
+  padding: 10px 20px; text-align: center; flex: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.pcb-chip .c1 { color: #3a8a3a; font-size: 0.7rem; }
+.pcb-chip .c2 { color: #2a6a2a; font-size: 0.85rem; font-weight: 700; }
+.pcb-chip .c3 { color: #1e4a1e; font-size: 0.62rem; }
+.rp2040-box {
+  background: #0a1a0a; border: 1px solid #1a3a1a; border-radius: 5px;
+  padding: 5px 10px; text-align: center; width: 100%;
+}
+.rp2040-box .r1 { color: #3a7a3a; font-size: 0.62rem; }
+.rp2040-box .r2 { color: #4a9a4a; font-size: 0.72rem; font-weight: 600; }
+.can-box {
+  background: #0a100a; border: 1px solid #1a3a2a; border-radius: 5px;
+  padding: 5px 10px; text-align: center; width: 100%;
+  color: #3a7a5a; font-size: 0.62rem;
+}
+.power-rail {
+  display: flex; gap: 3px; flex-wrap: wrap; justify-content: center; width: 100%;
+}
+.pwr-badge {
+  font-size: 0.58rem; font-weight: 700; padding: 2px 5px; border-radius: 3px;
+}
+
+/* ── Right panel ── */
+.right-panel {
+  width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
+  padding-left: 8px;
+}
+.panel-box {
+  background: #1a1d26; border: 1px solid #2a2d3a; border-radius: 6px; overflow: hidden;
+}
+.panel-box h3 {
+  background: #252836; padding: 7px 12px; font-size: 0.78rem; color: #99aacc;
+  border-bottom: 1px solid #2a2d3a;
+}
+.summary-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+.summary-table td { padding: 3px 10px; border-bottom: 1px solid #1e2030; }
+.summary-table tr:last-child td { border-bottom: none; }
+.summary-table .s-pin { color: #888; font-weight: 600; width: 80px; }
+.summary-table .s-func { color: #ccc; }
+.summary-table .s-new { color: #ffd700; }
+.summary-table .s-empty { color: #444; }
+
+.diff-box { padding: 10px 12px; font-size: 0.7rem; }
+.diff-row { margin: 3px 0; display: flex; align-items: flex-start; gap: 6px; }
+.diff-row .d-icon { flex-shrink: 0; }
+.diff-row.diff-old { color: #ff8888; }
+.diff-row.diff-new { color: #88ff88; }
+.diff-row.diff-ok  { color: #55aa55; }
+.diff-row.diff-warn { color: #ffaa44; }
+
+.conflict-box { padding: 8px 12px; font-size: 0.7rem; }
+.conflict-item { color: #ff9944; margin: 2px 0; }
+
+/* ── Legend / color strips ── */
+.color-strip { height: 3px; width: 100%; }
+
+/* category colors */
+.cat-motor    { color: #7ab3ff; }
+.cat-safety   { color: #ff8888; }
+.cat-actuator { color: #ffaa44; }
+.cat-tower    { color: #cc99ff; }
+.cat-comm     { color: #55ddcc; }
+.cat-reed     { color: #55cc88; }
+.cat-can      { color: #66dd66; }
+.cat-sensor   { color: #ff6699; }
+.cat-system   { color: #ffee66; }
+.cat-unused   { color: #444; }
+
+/* ── PCB health badges ── */
+.health-badge {
+  font-size: 0.6rem; font-weight: 700; padding: 1px 4px;
+  border-radius: 3px; flex-shrink: 0; white-space: nowrap; cursor: default;
+}
+.health-ok   { background:#0a2a0a; color:#33aa33; border:1px solid #1a5a1a; }
+.health-warn { background:#2a1a00; color:#ffaa33; border:1px solid #5a3a00; }
+.health-bad  { background:#2a0a0a; color:#ff4444; border:1px solid #6a1a1a; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>1-DOF Pin Configurator — STM32G474RETx</h1>
+  <button class="btn primary" onclick="loadFirmwareDefaults()">โหลด firmware ปัจจุบัน</button>
+  <button class="btn primary" onclick="loadNewPCBDefaults()">โหลด PCB ใหม่ (แก้แล้ว)</button>
+  <button class="btn" onclick="clearAll()">ล้างทั้งหมด</button>
+  <button class="btn" onclick="importFromFile()">📂 Import TXT</button>
+  <button class="btn warn" onclick="exportSummary()">Export Summary</button>
+</div>
+
+<div class="main">
+
+  <!-- LEFT PINS -->
+  <div class="pin-col left" id="col-left"></div>
+
+  <!-- PCB BODY -->
+  <div class="pcb-body">
+    <div class="power-rail">
+      <span class="pwr-badge" style="background:#3a0808;color:#ff6666">GND</span>
+      <span class="pwr-badge" style="background:#080838;color:#6688ff">5V</span>
+      <span class="pwr-badge" style="background:#3a0808;color:#ff6666">GND</span>
+      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
+      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
+      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
+      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
+    </div>
+
+    <div class="rp2040-box">
+      <div class="r1">USB-C Joystick Bridge</div>
+      <div class="r2">RP2040-Zero</div>
+    </div>
+
+    <div class="pcb-chip">
+      <div class="c1">Custom PCB</div>
+      <div class="c2">STM32G474RETx</div>
+      <div class="c3">170 MHz · LQFP64</div>
+    </div>
+
+    <div class="can-box">
+      TJA1050 CAN Transceiver<br>
+      PA11(RX) / PA12(TX) internal<br>
+      → CANH / CANL @ 1Mbit/s
+    </div>
+
+    <div style="font-size:0.58rem;color:#1a4a1a;text-align:center;padding-top:4px">
+      Solenoid drivers: PC1 · PB11 · PC6
+    </div>
+  </div>
+
+  <!-- RIGHT PINS -->
+  <div class="pin-col right" id="col-right"></div>
+
+  <!-- RIGHT PANEL -->
+  <div class="right-panel">
+
+    <div class="panel-box">
+      <h3>⚡ Conflicts / Warnings</h3>
+      <div class="conflict-box" id="conflict-box">
+        <span style="color:#444">ยังไม่มี conflict</span>
+      </div>
+    </div>
+
+    <div class="panel-box">
+      <h3>📋 Current Assignment</h3>
+      <table class="summary-table" id="summary-table"></table>
+    </div>
+
+    <div class="panel-box">
+      <h3>🔄 Diff vs Firmware (NUCLEO)</h3>
+      <div class="diff-box" id="diff-box">
+        <span style="color:#444">โหลด config เพื่อดู diff</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── Pin lists ──────────────────────────────────────────────────────────────
+const LEFT_PINS  = ['PD2','PC11','PC10','PC12','PA15','GND','PB7','PC13','PC2','PC3','PC0','PC1','PB0','PA4','PA1','PA0'];
+const RIGHT_PINS = ['PC9','PC8','PC6','PC5','PB12','PB11','PB2','PB1','CANH','CANL','PB15','PB14','PB13','PC4/PA2','PB8','PB9','PA8','PA9'];
+const FIXED_PINS = new Set(['GND','CANH','CANL','PB8','PB9','PC4/PA2']);
+
+// ── Function catalog ──────────────────────────────────────────────────────
+const FUNC_GROUPS = [
+  { group: 'Motor & Encoder', color: '#7ab3ff', funcs: [
+    { id: 'MOTOR_DIR',    label: 'MOTOR_DIR',         dir: 'OUT', note: 'Cytron DIR input' },
+    { id: 'PWM_TIM3',     label: 'PWM (TIM3)',         dir: 'OUT', note: 'Motor PWM 20kHz', validPins: ['PA6','PA7','PB0','PB7','PC6','PC8','PC9'] },
+    { id: 'ENC_A',        label: 'ENC_A (TIM1 CH1)',   dir: 'IN',  note: 'Encoder A — TIM1 CH1 AF6', validPins: ['PA8'] },
+    { id: 'ENC_B',        label: 'ENC_B (TIM1 CH2)',   dir: 'IN',  note: 'Encoder B — TIM1 CH2 AF6', validPins: ['PA9'] },
+  ]},
+  { group: 'Safety', color: '#ff8888', funcs: [
+    { id: 'ESTOP',        label: 'ESTOP input',         dir: 'IN',  note: 'PULLUP, active LOW, 200ms debounce' },
+    { id: 'RESET_BTN',    label: 'RESET_BTN',           dir: 'IN',  note: 'PULLUP, active LOW' },
+    { id: 'MODE',         label: 'MODE switch',          dir: 'IN',  note: 'PULLUP, EXTI, LOW=AUTO' },
+    { id: 'EMER_OUTPUT',  label: 'EMER_OUTPUT relay',    dir: 'OUT', note: 'Active HIGH' },
+  ]},
+  { group: 'Actuators', color: '#ffaa44', funcs: [
+    { id: 'POWER_LATCH',  label: 'POWER_LATCH',          dir: 'OUT', note: 'Cylinder DOWN / power latch' },
+    { id: 'GRIPPER',      label: 'GRIPPER solenoid',      dir: 'OUT', note: 'Gripper open/close' },
+    { id: 'PNEUMATIC',    label: 'PNEUMATIC solenoid',    dir: 'OUT', note: 'Pneumatic aux' },
+  ]},
+  { group: 'Tower Lights', color: '#cc99ff', funcs: [
+    { id: 'TOWER_G',      label: 'TOWER_G (Green)',       dir: 'OUT', note: '' },
+    { id: 'TOWER_Y',      label: 'TOWER_Y (Yellow)',      dir: 'OUT', note: '' },
+    { id: 'TOWER_R',      label: 'TOWER_R (Red)',         dir: 'OUT', note: '' },
+  ]},
+  { group: 'Reed Switches', color: '#55cc88', funcs: [
+    { id: 'REED_UP',      label: 'REED_UP',               dir: 'IN',  note: 'PULLDOWN, cylinder UP' },
+    { id: 'REED_DOWN',    label: 'REED_DOWN',             dir: 'IN',  note: 'PULLDOWN, cylinder DOWN' },
+    { id: 'REED_GRIP',    label: 'REED_GRIP',             dir: 'IN',  note: 'PULLDOWN, gripper closed' },
+  ]},
+  { group: 'Sensors', color: '#ff6699', funcs: [
+    { id: 'HOME_SENSOR',  label: 'HOME_SENSOR',           dir: 'IN',  note: 'PULLUP, EXTI rising, HIGH=detected', validPins: ['PA3','PB3','PC3','PD3','PE3'] },
+    { id: 'CURRENT_ADC',  label: 'CURRENT_ADC',           dir: 'IN',  note: 'ADC analog input', validPins: ['PA0','PA1','PA2','PA3','PA4','PA5','PB0','PB1','PC0','PC1','PC2','PC3','PC4','PC5','PC4/PA2'] },
+  ]},
+  // Communication fixed on hardware — not assignable:
+  //   PC10/PC11 = USART3 → RP2040 joystick (fixed on PCB)
+  //   PA2/PA3   = LPUART1 Modbus → ST-Link VCP (internal NUCLEO)
+  { group: 'System', color: '#ffee66', funcs: [
+    { id: 'POWER_BTN',    label: 'POWER_BTN',             dir: 'IN',  note: 'PULLUP, active LOW' },
+    { id: 'RESET_LED',    label: 'RESET_LED',             dir: 'OUT', note: 'Status LED' },
+    { id: 'HEARTBEAT',    label: 'HEARTBEAT_LED',         dir: 'OUT', note: 'Blink LED (1 Hz)' },
+    { id: 'GPIO_OUT',     label: 'GPIO Output (general)', dir: 'OUT', note: '' },
+    { id: 'GPIO_IN',      label: 'GPIO Input (general)',  dir: 'IN',  note: '' },
+  ]},
+];
+
+// ── Category color lookup ─────────────────────────────────────────────────
+const FUNC_COLOR = {};
+const FUNC_META  = {};
+FUNC_GROUPS.forEach(g => {
+  g.funcs.forEach(f => {
+    FUNC_COLOR[f.id] = g.color;
+    FUNC_META[f.id]  = { ...f, groupColor: g.color };
+  });
+});
+
+// ── Fixed pin assignments (cannot be changed) ─────────────────────────────
+const FIXED_ASSIGN = {
+  'GND':     { label: 'GND',                      color: '#555' },
+  'CANH':    { label: 'CAN Bus H (TJA1050)',       color: '#66dd66' },
+  'CANL':    { label: 'CAN Bus L (TJA1050)',       color: '#66dd66' },
+  'PB8':     { label: 'USART3 TX → RP2040',        color: '#55ddcc' },
+  'PB9':     { label: 'USART3 RX ← RP2040',        color: '#55ddcc' },
+  'PC4/PA2': { label: 'LPUART1 TX (ST-Link/VCP)',  color: '#55ddcc' },
+};
+
+// ── Current firmware config (NUCLEO) ──────────────────────────────────────
+const FIRMWARE_NUCLEO = {
+  'PA0':  'MOTOR_DIR', 'PA6':  'PWM_TIM3',
+  'PA8':  'ENC_A',     'PA9':  'ENC_B',
+  'PC3':  'HOME_SENSOR',
+  'PA1':  'REED_UP',   'PA4':  'REED_DOWN', 'PB0': 'REED_GRIP',
+  'PB13': 'ESTOP',     'PC13': 'RESET_BTN',
+  'PB10': 'POWER_BTN', 'PB5':  'MODE',
+  'PC1':  'POWER_LATCH','PB11': 'GRIPPER',  'PC6': 'PNEUMATIC',
+  'PC7':  'TOWER_G',   'PB7':  'TOWER_Y',  'PC8': 'TOWER_R',
+  'PB14': 'EMER_OUTPUT','PB4': 'RESET_LED',
+  'PA5':  'HEARTBEAT',
+  'PA2':  'LPUART1_TX','PA3':  'LPUART1_RX',
+  'PC10': 'USART3_TX', 'PC11': 'USART3_RX',
+  'PC4':  'CURRENT_ADC',
+};
+
+// ── PCB ใหม่ (แก้ pin มีปัญหาแล้ว) ───────────────────────────────────────
+// การเปลี่ยนจาก user's export:
+//   PC0  → ESTOP      ❌ PC0↔PC1 short  →  ย้ายไป PA15 (clean)
+//   PB11 → RESET_LED  ⚠ GND_SHORT        →  ย้ายไป PD2  (clean)
+//   PC4/PA2 → EMER    ❌ PC4=VCC, PA2=LPUART → ย้ายไป PC6  (clean)
+//   PA0  → MOTOR_DIR  (เดิม) → เปลี่ยนเป็น CURRENT_ADC (PA0=ADC2_IN1, clean)
+//   PC8  → MOTOR_DIR  (เดิม TOWER_R) → motor dir
+//   Modbus TX: PC4/PA2 → LPUART1_TX (PA2 คือ physical pin)
+const FIRMWARE_NEW_PCB = {
+  // Motor & Encoder
+  'PC9':     'PWM_TIM3',    // TIM3 CH4 AF2 — ย้ายจาก PA6
+  'PC8':     'MOTOR_DIR',   // GPIO OUT — ย้ายจาก PA0
+  'PA8':     'ENC_A',
+  'PA9':     'ENC_B',
+  // Sensors
+  'PC3':     'HOME_SENSOR',
+  'PA0':     'CURRENT_ADC', // ADC2_IN1 — clean, ย้ายจาก PC4
+  // Reed switches
+  'PA1':     'REED_UP',     // monitor — inconsistent VCC_SHORT บางรอบ
+  'PA4':     'REED_DOWN',
+  'PB0':     'REED_GRIP',
+  // Safety  ← ทั้งหมดย้ายไป pin สะอาด
+  'PA15':    'ESTOP',       // ย้ายจาก PC0 (PC0↔PC1 short)
+  'PC13':    'RESET_BTN',
+  'PC6':     'EMER_OUTPUT', // ย้ายจาก PC4/PA2 (PC4=VCC_SHORT)
+  // System
+  'PC2':     'MODE',
+  'PB7':     'POWER_BTN',
+  'PD2':     'RESET_LED',   // ย้ายจาก PB11 (GND_SHORT)
+  // Actuators
+  'PB12':    'POWER_LATCH',
+  'PB2':     'GRIPPER',
+  'PB1':     'PNEUMATIC',
+  // Tower lights
+  'PB15':    'TOWER_G',
+  'PB14':    'TOWER_Y',
+  'PB13':    'TOWER_R',
+  // PC10/PC11/PC4-PA2 = fixed hardware, ไม่ต้อง assign
+};
+const NEW_PCB_FIXED = FIRMWARE_NEW_PCB;
+
+// ── State ─────────────────────────────────────────────────────────────────
+const assignment = {};  // pin → funcId
+
+// ── Build dropdown ────────────────────────────────────────────────────────
+function makeSelect(pin) {
+  const sel = document.createElement('select');
+  sel.className = 'func-sel';
+  sel.id = 'sel-' + pin.replace('/','_');
+
+  const defOpt = document.createElement('option');
+  defOpt.value = ''; defOpt.textContent = '— ไม่ได้ assign —';
+  sel.appendChild(defOpt);
+
+  FUNC_GROUPS.forEach(g => {
+    const og = document.createElement('optgroup');
+    og.label = g.group;
+    g.funcs.forEach(f => {
+      const o = document.createElement('option');
+      o.value = f.id;
+      const af_warn = f.validPins && !f.validPins.includes(pin) ? ' ⚠' : '';
+      o.textContent = f.label + af_warn;
+      og.appendChild(o);
+    });
+    sel.appendChild(og);
+  });
+
+  sel.addEventListener('change', () => {
+    assignment[pin] = sel.value || null;
+    updateRow(pin);
+    updateAll();
+  });
+  return sel;
+}
+
+// ── Build pin rows ─────────────────────────────────────────────────────────
+function buildCol(pins, colId, isLeft) {
+  const col = document.getElementById(colId);
+  pins.forEach(pin => {
+    const row = document.createElement('div');
+    row.className = 'pin-row';
+    row.id = 'row-' + pin.replace('/','_');
+
+    const label = document.createElement('div');
+    label.className = 'pin-label';
+    label.textContent = pin;
+
+    const dot = document.createElement('div');
+    dot.className = 'pin-dot';
+    dot.id = 'dot-' + pin.replace('/','_');
+
+    const warn = document.createElement('div');
+    warn.className = 'warn-icon';
+    warn.id = 'warn-' + pin.replace('/','_');
+
+    if (FIXED_PINS.has(pin)) {
+      const fixed = FIXED_ASSIGN[pin];
+      dot.style.background = fixed.color;
+      const lbl = document.createElement('div');
+      lbl.style.cssText = 'font-size:0.68rem;color:'+fixed.color+';flex:1;';
+      lbl.textContent = fixed.label;
+      if (isLeft) row.append(label, dot, lbl, warn);
+      else        row.append(warn, lbl, dot, label);
+    } else {
+      const sel = makeSelect(pin);
+      if (isLeft) row.append(label, dot, sel, warn);
+      else        row.append(warn, sel, dot, label);
+    }
+    col.appendChild(row);
+  });
+}
+
+// ── Update single row color ───────────────────────────────────────────────
+function updateRow(pin) {
+  const dot  = document.getElementById('dot-' + pin.replace('/','_'));
+  const warn = document.getElementById('warn-' + pin.replace('/','_'));
+  if (!dot) return;
+
+  const fid = assignment[pin];
+  if (!fid) { dot.style.background = '#333'; if(warn) warn.textContent = ''; return; }
+
+  const meta = FUNC_META[fid];
+  dot.style.background = meta ? meta.groupColor : '#555';
+
+  // AF warning
+  if (meta && meta.validPins && !meta.validPins.includes(pin)) {
+    if (warn) { warn.textContent = '⚠'; warn.title = 'ต้องการ pin: ' + meta.validPins.join(' / ') + '\n(' + meta.note + ')'; }
+  } else {
+    if (warn) warn.textContent = '';
+  }
+}
+
+// ── Update summary + diff + conflicts ─────────────────────────────────────
+function updateAll() {
+  updateSummary();
+  updateDiff();
+  updateConflicts();
+}
+
+function getFuncLabel(fid) {
+  const m = FUNC_META[fid];
+  return m ? m.label : fid;
+}
+
+function updateSummary() {
+  const tbl = document.getElementById('summary-table');
+  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
+  const rows = allPins.map(pin => {
+    const fid   = FIXED_PINS.has(pin) ? null : assignment[pin];
+    const fixed = FIXED_ASSIGN[pin];
+    if (fixed) {
+      return `<tr><td class="s-pin">${pin}</td><td class="s-func" style="color:${fixed.color}">${fixed.label}</td></tr>`;
+    }
+    if (!fid) return `<tr><td class="s-pin">${pin}</td><td class="s-empty">—</td></tr>`;
+    const color = FUNC_META[fid]?.groupColor || '#ccc';
+    const isNew = FIRMWARE_NUCLEO[pin] !== fid && NEW_PCB_FIXED[pin] === fid;
+    return `<tr><td class="s-pin">${pin}</td><td class="s-func${isNew?' s-new':''}" style="color:${color}">${getFuncLabel(fid)}</td></tr>`;
+  });
+  tbl.innerHTML = rows.join('');
+}
+
+function updateDiff() {
+  const box = document.getElementById('diff-box');
+  const changes = [];
+  const allPins = [...LEFT_PINS, ...RIGHT_PINS].filter(p => !FIXED_PINS.has(p));
+
+  allPins.forEach(pin => {
+    const cur = assignment[pin];
+    const old = FIRMWARE_NUCLEO[pin];
+    if (!cur && !old) return;
+    if (cur === old) {
+      changes.push({ type:'ok', pin, cur, old });
+    } else if (cur && !old) {
+      changes.push({ type:'new', pin, cur });
+    } else if (!cur && old) {
+      changes.push({ type:'removed', pin, old });
+    } else {
+      changes.push({ type:'changed', pin, cur, old });
+    }
+  });
+
+  if (!changes.length) { box.innerHTML = '<span style="color:#444">โหลด config เพื่อดู diff</span>'; return; }
+
+  const changed = changes.filter(c => c.type !== 'ok');
+  if (!changed.length) { box.innerHTML = '<span style="color:#55aa55">✓ ตรงกับ firmware ทุกพิน</span>'; return; }
+
+  box.innerHTML = changed.map(c => {
+    if (c.type === 'changed')
+      return `<div class="diff-row diff-new">⟳ <b>${c.pin}</b>: ${getFuncLabel(c.old)||'—'} → ${getFuncLabel(c.cur)}</div>`;
+    if (c.type === 'new')
+      return `<div class="diff-row diff-new">+ <b>${c.pin}</b>: ${getFuncLabel(c.cur)}</div>`;
+    if (c.type === 'removed')
+      return `<div class="diff-row diff-old">− <b>${c.pin}</b>: ${getFuncLabel(c.old)} ถูกลบ</div>`;
+    return '';
+  }).join('');
+}
+
+function updateConflicts() {
+  const box = document.getElementById('conflict-box');
+  const used = {};
+  const errors   = [];  // red — ต้องแก้
+  const warnings = [];  // orange — AF mismatch
+  const missing  = [];  // yellow — ยังไม่ assign
+
+  // 1. duplicate function check
+  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+    const fid = assignment[pin];
+    if (!fid) return;
+    if (used[fid]) errors.push(`✖ ${getFuncLabel(fid)} assign 2 พิน: ${used[fid]} + ${pin}`);
+    else used[fid] = pin;
+  });
+
+  // 2. AF pin compatibility check
+  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+    const fid = assignment[pin];
+    if (!fid) return;
+    const meta = FUNC_META[fid];
+    if (meta?.validPins && !meta.validPins.includes(pin))
+      warnings.push(`⚠ ${pin} → ${getFuncLabel(fid)}: ต้องการ ${meta.validPins.join(' / ')}`);
+  });
+
+  // 3. missing functions — ทุก function ที่ยังไม่มีพิน
+  FUNC_GROUPS.forEach(g => {
+    g.funcs.forEach(f => {
+      if (f.id === 'GPIO_OUT' || f.id === 'GPIO_IN') return; // generic, skip
+      const assigned = [...LEFT_PINS,...RIGHT_PINS].find(p => assignment[p] === f.id);
+      if (!assigned) missing.push(f);
+    });
+  });
+
+  // 4. unassigned PCB pins
+  const unassignedPins = [...LEFT_PINS,...RIGHT_PINS].filter(p =>
+    !FIXED_PINS.has(p) && !assignment[p]
+  );
+
+  let html = '';
+
+  if (errors.length) {
+    html += `<div style="color:#ff6666;font-weight:600;margin:4px 0">❌ Errors (${errors.length})</div>`;
+    html += errors.map(e => `<div class="conflict-item" style="color:#ff6666">${e}</div>`).join('');
+  }
+
+  if (warnings.length) {
+    html += `<div style="color:#ffaa44;font-weight:600;margin:6px 0 2px">⚠ AF Warnings (${warnings.length})</div>`;
+    html += warnings.map(w => `<div class="conflict-item" style="color:#ffaa44">${w}</div>`).join('');
+  }
+
+  if (unassignedPins.length) {
+    html += `<div style="color:#888;font-weight:600;margin:6px 0 2px">○ พินที่ยังว่าง (${unassignedPins.length})</div>`;
+    html += `<div style="color:#555;font-size:0.68rem;line-height:1.8">${unassignedPins.join(' · ')}</div>`;
+  }
+
+  if (missing.length) {
+    html += `<div style="color:#ffcc44;font-weight:600;margin:6px 0 2px">? Functions ยังไม่มีพิน (${missing.length})</div>`;
+
+    const byGroup = {};
+    missing.forEach(f => {
+      const g = FUNC_GROUPS.find(g => g.funcs.includes(f));
+      if (!byGroup[g.group]) byGroup[g.group] = { color: g.color, funcs: [] };
+      byGroup[g.group].funcs.push(f.label);
+    });
+    Object.entries(byGroup).forEach(([grp, data]) => {
+      html += `<div style="color:${data.color};font-size:0.68rem;margin-top:3px">
+        <b>${grp}:</b> ${data.funcs.join(', ')}
+      </div>`;
+    });
+  }
+
+  if (!html) html = '<span style="color:#3a7a3a">✓ ครบทุก function ไม่มี conflict</span>';
+  box.innerHTML = html;
+}
+
+// ── Load presets ──────────────────────────────────────────────────────────
+function applyConfig(config) {
+  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
+  allPins.forEach(pin => {
+    if (FIXED_PINS.has(pin)) return;
+    const fid = config[pin] || null;
+    assignment[pin] = fid;
+    const sel = document.getElementById('sel-' + pin.replace('/','_'));
+    if (sel) sel.value = fid || '';
+    updateRow(pin);
+  });
+  updateAll();
+}
+
+function loadFirmwareDefaults() { applyConfig(FIRMWARE_NUCLEO); }
+function loadNewPCBDefaults()   { applyConfig(NEW_PCB_FIXED); }
+
+function clearAll() {
+  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
+  allPins.forEach(pin => {
+    if (FIXED_PINS.has(pin)) return;
+    assignment[pin] = null;
+    const sel = document.getElementById('sel-' + pin.replace('/','_'));
+    if (sel) sel.value = '';
+    updateRow(pin);
+  });
+  updateAll();
+}
+
+function exportSummary() {
+  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
+  let lines = ['/* Pin Assignment Export — 1-DOF Robot */', ''];
+  allPins.forEach(pin => {
+    const fid = FIXED_PINS.has(pin) ? FIXED_ASSIGN[pin]?.label : assignment[pin];
+    if (fid) lines.push(`  ${pin.padEnd(12)} → ${getFuncLabel(fid)}`);
+  });
+  lines.push('');
+  lines.push('/* IOC changes needed vs NUCLEO: */');
+  allPins.filter(p => !FIXED_PINS.has(p)).forEach(pin => {
+    const cur = assignment[pin];
+    const old = FIRMWARE_NUCLEO[pin];
+    if (cur && cur !== old)
+      lines.push(`  ${pin.padEnd(12)} ${getFuncLabel(old)||'(unassigned)'} → ${getFuncLabel(cur)}`);
+  });
+
+  const blob = new Blob([lines.join('\n')], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'pin_assignment.txt';
+  a.click();
+}
+
+// ── PCB Test Health (from pin_short_test results) ─────────────────────────
+const PCB_STATUS = {
+  'PC4':     { s:'bad',  n:'short กับ PC5→VCC → ADC = 4095 เสมอ' },
+  'PC5':     { s:'bad',  n:'VCC_SHORT บน PCB ทุกรอบ' },
+  'PC4/PA2': { s:'bad',  n:'PC4 short กับ PC5→VCC + PA2=LPUART1 conflict' },
+  'PA1':     { s:'warn', n:'VCC_SHORT บน PCB (บางรอบ) → ใช้เป็น digital IN ได้ แต่เสี่ยง' },
+  'PC0':     { s:'warn', n:'PC0↔PC1 short (บางรอบ) → ESTOP เสี่ยง false-trigger' },
+  'PC1':     { s:'warn', n:'PC0↔PC1 short (บางรอบ)' },
+  'PB11':    { s:'warn', n:'GND_SHORT บน PCB (บางรอบ) → output อาจถูกดึงลง' },
+  'PC10':    { s:'warn', n:'short กับ PC12 (บางรอบ) — ใช้เป็น output ได้แต่เสี่ยง' },
+  'PC12':    { s:'warn', n:'short กับ PC10 (บางรอบ) — ควรปล่อยว่าง' },
+  'PB8':     { s:'ok',   n:'USART3 TX → RP2040 — VCC/GND ในเทสคือ UART idle ปกติ' },
+  'PB9':     { s:'ok',   n:'USART3 RX ← RP2040 — fixed on PCB' },
+  'PA11':    { s:'warn', n:'VCC_SHORT บน PCB (USB D-) — ถ้าไม่ใช้ USB ไม่กระทบ' },
+  'PA12':    { s:'warn', n:'VCC_SHORT บน PCB (USB D+) — ถ้าไม่ใช้ USB ไม่กระทบ' },
+};
+
+function healthBadge(pin) {
+  const h = PCB_STATUS[pin];
+  if (!h) return null;
+  const d = document.createElement('span');
+  d.className = 'health-badge ' + (h.s === 'bad' ? 'health-bad' : 'health-warn');
+  d.textContent = h.s === 'bad' ? '✖ BAD' : '⚠ WARN';
+  d.title = h.n;
+  return d;
+}
+
+// ── Import from TXT ────────────────────────────────────────────────────────
+function importFromFile() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.txt';
+  inp.onchange = e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      const cfg = parseTxt(ev.target.result);
+      const count = Object.keys(cfg).length;
+      applyConfig(cfg);
+      alert('Import สำเร็จ — โหลด ' + count + ' pin assignment');
+    };
+    r.readAsText(f);
+  };
+  inp.click();
+}
+
+function parseTxt(text) {
+  // build reverse label→id and id→id lookup
+  const lookup = {};
+  FUNC_GROUPS.forEach(g => g.funcs.forEach(f => {
+    lookup[f.label.toLowerCase().trim()] = f.id;
+    lookup[f.id.toLowerCase().trim()]    = f.id;
+  }));
+
+  const allPins = new Set([...LEFT_PINS, ...RIGHT_PINS]);
+  const cfg = {};
+  for (const line of text.split('\n')) {
+    // match "  PIN   → FUNCTION LABEL"
+    const m = line.match(/^\s*([\w/]+)\s*[→\->]+\s*(.+?)\s*$/);
+    if (!m) continue;
+    const pin  = m[1].trim();
+    const lbl  = m[2].trim().toLowerCase();
+    if (!allPins.has(pin) || FIXED_PINS.has(pin)) continue;
+    const fid = lookup[lbl];
+    if (fid) cfg[pin] = fid;
+  }
+  return cfg;
+}
+
+// patch buildCol to insert health badge
+const _origBuildCol = buildCol;
+
+// ── Init ──────────────────────────────────────────────────────────────────
+buildCol(LEFT_PINS,  'col-left',  true);
+buildCol(RIGHT_PINS, 'col-right', false);
+
+// inject health badges after build
+[...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+  if (FIXED_PINS.has(pin)) return;
+  const row = document.getElementById('row-' + pin.replace('/','_'));
+  if (!row) return;
+  const badge = healthBadge(pin);
+  if (!badge) return;
+  // append before last child (warn-icon)
+  row.appendChild(badge);
+});
+updateAll();
+
+// Auto-load new PCB on start
+loadNewPCBDefaults();
+</script>
+</body>
+</html>

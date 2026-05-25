@@ -31,6 +31,8 @@
 #include "REF_FEEDFORWARD.h"
 #include "DistFF.h"
 #include "pid_control.h"
+#include "pin_short_test.h"
+#include "pcb_io_test.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -144,6 +146,11 @@ static TestState_t test_state     = TEST_IDLE;
 static int16_t     test_repeat    = 0;
 static uint8_t     test_mv_armed  = 0;   // 1 = next tick should start move
 
+// Quick pick/place from joystick (production IDLE only; LT+A=pick, LT+Y=place)
+typedef enum { JSEQ_IDLE=0, JSEQ_PK1, JSEQ_PK2, JSEQ_PK3, JSEQ_PL1, JSEQ_PL2 } JoySeqState_t;
+static JoySeqState_t joy_seq_state = JSEQ_IDLE;
+static uint32_t      joy_seq_timer = 0;
+
 // Reed switch states — updated every 100Hz tick (active LOW: 1 = triggered)
 volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
 volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
@@ -181,16 +188,11 @@ typedef enum {
 } SystemMode_t;
 
 /* =========================================================================
- * DevDashboard — 6 sub-structs, expand โฟลเดอร์ที่ต้องการเลย
- *   Cmd    → คำสั่ง P2P (เขียน)
- *   Status → สถานะ real-time (อ่าน)
- *   Traj   → Trajectory parameters (แก้ได้)
- *   Sys    → System config + motor settings
- *   IO     → Raw GPIO + Joystick (อ่าน)
- *   Test   → HW/Motor test overrides (mode=1,3 เท่านั้น)
+ * DevDashboard — 6 sub-structs; each appears as a named folder
+ *   in Live Expressions: dev_dash → Cmd / Status / Traj / Sys / IO / Test
  * ========================================================================= */
 
-// ── Cmd: คำสั่ง P2P ──────────────────────────────────────────────────────────
+/* ── Cmd: คำสั่ง P2P (เขียน) ────────────────────────────────────────────── */
 typedef struct {
   float    target_deg;    // เป้าหมาย (degrees จาก home)
   uint8_t  start_move;    // Set 1 → สั่ง move (auto-clear)
@@ -198,79 +200,67 @@ typedef struct {
   uint8_t  cancel_move;   // Set 1 → stop ทันที (auto-clear)
 } DashCmd_t;
 
-// ── Status: สถานะ real-time (อ่าน) ──────────────────────────────────────────
+/* ── Status: สถานะ real-time (อ่าน) ─────────────────────────────────────── */
 typedef struct {
-  float        pos_deg;       // ตำแหน่ง (degrees)
-  float        pos_rad;       // ตำแหน่ง (rad)
-  float        vel_rad_s;     // ความเร็ว (rad/s)
-  float        acc_rad_s2;    // ความเร่ง (rad/s²)
-  float        pos_ideal;     // trajectory reference pos (rad)
-  float        vel_ideal;     // trajectory reference vel (rad/s)
-  float        pos_err;       // position error (rad)
-  float        vel_sp;        // velocity setpoint (rad/s)
-  float        pwm_out;       // final motor command -1..+1
-  uint8_t      traj_active;   // 1 = trajectory กำลังทำงาน
-  float        current_A;     // กระแสมอเตอร์ (A)
-  int32_t      encoder_raw;   // encoder counts
-  float        motor_cmd;     // motor speed command
-  RobotState_t state;         // current state
+  float        pos_deg;         // ตำแหน่ง (degrees)
+  float        pos_rad;         // ตำแหน่ง (rad)
+  float        vel_rad_s;       // ความเร็ว (rad/s)
+  float        acc_rad_s2;      // ความเร่ง (rad/s²)
+  float        pos_ideal;       // trajectory ref pos (rad)
+  float        vel_ideal;       // trajectory ref vel (rad/s)
+  float        pos_err;         // position error (rad)
+  float        vel_sp;          // vel setpoint จาก pos loop (rad/s)
+  float        pwm_out;         // motor command -1..+1
+  uint8_t      traj_active;     // 1 = trajectory กำลังทำงาน
+  float        current_A;       // กระแส (A)
+  int32_t      encoder_raw;     // encoder counts (raw)
+  float        motor_cmd;       // motor speed command (mirror)
+  RobotState_t status_state;    // current state
 } DashStatus_t;
 
-// ── Traj: Trajectory parameters ──────────────────────────────────────────────
+/* ── Traj: Trajectory parameters ─────────────────────────────────────────── */
 typedef struct {
   uint8_t  traj_type;     // 0=Trapezoid  1=S-Curve  2=Direct
   uint8_t  time_mode;     // 0=constraint-based  1=time-based
-  float    v_max;         // rad/s
-  float    a_max;         // rad/s²
-  float    j_max;         // rad/s³ (S-Curve เท่านั้น)
-  float    t_acc_seg;     // accel duration (s, time_mode=1)
-  float    t_cruise_seg;  // cruise duration (s, time_mode=1)
-  float    t1_seg;        // S-Curve jerk seg (s)
-  float    t2_seg;        // S-Curve const-accel seg (s)
+  float    v_max;         // ความเร็วสูงสุด (rad/s)
+  float    a_max;         // ความเร่งสูงสุด (rad/s²)
+  float    j_max;         // jerk สูงสุด (rad/s³, S-Curve)
+  float    t_acc_seg;     // ช่วงเร่ง (s)
+  float    t_cruise_seg;  // ช่วง cruise (s)
+  float    t1_seg;        // S-Curve jerk segment (s)
+  float    t2_seg;        // S-Curve const-accel segment (s)
 } DashTraj_t;
 
-// ── Sys: System config + motor settings ──────────────────────────────────────
+/* ── Sys: System config ──────────────────────────────────────────────────── */
 typedef struct {
   SystemMode_t mode;          // 0=Production 1=HW_Test 2=Joy_Test 3=Motor_Test
-  float    max_speed;         // motor speed cap 0.0–1.0
+  float    max_speed;         // speed cap 0.0–1.0
   float    ramp_rate;         // slew rate per 10ms (0.01=ช้า, 0.1=เร็ว)
   float    acc_alpha;         // velocity filter alpha (0.1=smooth, 1.0=raw)
-  float    cur_zero_v;        // current sensor zero V (auto-cal at boot)
-  float    cur_sens;          // current sensor sensitivity V/A (0.066)
+  float    cur_zero_v;        // current sensor zero voltage
+  float    cur_sens;          // sensitivity V/A (0.066)
   uint8_t  telemetry_mode;    // 0=Modbus  1=Simulink via LPUART1
 } DashSys_t;
 
-// ── IO: Raw GPIO + Joystick (อ่าน) ───────────────────────────────────────────
+/* ── IO: Raw GPIO + Joystick (อ่าน) ─────────────────────────────────────── */
 typedef struct {
-  uint8_t  in_estop;       // ESTOP pin
-  uint8_t  in_mode;        // MODE switch
-  uint8_t  in_reset;       // RESET button
-  uint8_t  in_power;       // POWER button
-  uint8_t  out_pwm;        // PWM active
-  uint8_t  out_dir;        // motor direction
-  uint8_t  out_pneumatic;
-  uint8_t  out_gripper;
-  uint8_t  out_tower_g;
-  uint8_t  out_tower_y;
-  uint8_t  out_tower_r;
-  uint8_t  out_reset_led;
-  uint8_t  out_emer;
-  uint8_t  joy_connected;  // 1 = joystick เชื่อมต่อ
-  float    joy_ly;         // Left Stick Y
-  float    joy_lt;         // Left Trigger
-  float    joy_rt;         // Right Trigger
-  uint16_t joy_buttons;    // raw bitmask
+  uint8_t  in_estop;          uint8_t  in_mode;
+  uint8_t  in_reset;          uint8_t  in_power;
+  uint8_t  out_pwm;           uint8_t  out_dir;
+  uint8_t  out_pneumatic;     uint8_t  out_gripper;
+  uint8_t  out_tower_g;       uint8_t  out_tower_y;  uint8_t  out_tower_r;
+  uint8_t  out_reset_led;     uint8_t  out_emer;
+  uint8_t  joy_connected;     float    joy_ly;
+  float    joy_lt;            float    joy_rt;
+  uint16_t joy_buttons;
 } DashIO_t;
 
-// ── Test: HW/Motor test overrides (mode=1 or 3 เท่านั้น) ────────────────────
+/* ── Test: HW test overrides (mode=1 or 3) ──────────────────────────────── */
 typedef struct {
   float    force_motor;
-  uint8_t  force_pneumatic;
-  uint8_t  force_gripper;
-  uint8_t  force_tower_g;
-  uint8_t  force_tower_y;
-  uint8_t  force_tower_r;
-  uint8_t  force_emer;
+  uint8_t  force_pneumatic;   uint8_t  force_gripper;
+  uint8_t  force_tower_g;     uint8_t  force_tower_y;
+  uint8_t  force_tower_r;     uint8_t  force_emer;
   float    test_speed;
   uint16_t test_period_fwd_ms;
   uint16_t test_period_rev_ms;
@@ -286,22 +276,22 @@ typedef struct {
 } DevDashboard_t;
 
 DevDashboard_t dev_dash = {
-  .Sys.mode          = SYS_MODE_PRODUCTION,
-  .Sys.ramp_rate     = 0.05f,
-  .Sys.max_speed     = 0.40f,
-  .Sys.cur_zero_v    = 2.46f,
-  .Sys.cur_sens      = 0.066f,
-  .Sys.telemetry_mode = 0,
-  .Sys.acc_alpha     = 0.2f,
-  .Traj.traj_type    = 0,
-  .Traj.time_mode    = 0,
-  .Traj.v_max        = 6.28f,
-  .Traj.a_max        = 12.56f,
-  .Traj.j_max        = 10.0f,
-  .Traj.t1_seg       = 0.1f,
-  .Traj.t2_seg       = 0.1f,
-  .Traj.t_acc_seg    = 0.3f,
-  .Traj.t_cruise_seg = 0.2f,
+  .Sys.mode            = SYS_MODE_PRODUCTION,
+  .Sys.ramp_rate       = 0.05f,
+  .Sys.max_speed       = 0.40f,
+  .Sys.cur_zero_v      = 2.46f,
+  .Sys.cur_sens        = 0.066f,
+  .Sys.telemetry_mode  = 0,
+  .Sys.acc_alpha       = 0.2f,
+  .Traj.traj_type      = 0,
+  .Traj.time_mode      = 0,
+  .Traj.v_max          = 6.28f,
+  .Traj.a_max          = 12.56f,
+  .Traj.j_max          = 10.0f,
+  .Traj.t1_seg         = 0.1f,
+  .Traj.t2_seg         = 0.1f,
+  .Traj.t_acc_seg      = 0.3f,
+  .Traj.t_cruise_seg   = 0.2f,
   .Test.test_speed         = 0.30f,
   .Test.test_period_fwd_ms = 1000,
   .Test.test_period_rev_ms = 1000,
@@ -441,6 +431,17 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     modbus_rx_cplt(&mb_slave, Size);
   }
 }
+
+// Re-arm USART3 DMA after any UART error (framing, overrun, noise)
+// Without this, DMA stops silently and joystick reads freeze at 0
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART3)
+  {
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
+    __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -482,6 +483,14 @@ int main(void)
   MX_TIM3_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
+  /* ── PCB I/O TEST ───────────────────────────────────────────────────────
+   * Validates new pin assignment before IOC commit.
+   * Open terminal 115200 8N1. Function blocks at the end; reflash after.
+   * To switch tests: comment one line, uncomment the other.
+   * ----------------------------------------------------------------------- */
+  pcb_io_test(&hlpuart1);
+  // pin_short_test(&hlpuart1);
+
   // EMER (ESTOP_Pin PB13): active LOW, PULLUP — polled in 100Hz loop
   // MODE selector: PULLUP (LOW=AUTO, HIGH=MANUAL)
   {
@@ -572,6 +581,8 @@ int main(void)
       0.02f,       // tau
       0.001f);     // Ts
 
+  /* (pin_short_test call moved to top of USER CODE BEGIN 2) */
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -604,35 +615,42 @@ int main(void)
       reed_grip = (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == REED_ACTIVE) ? 1 : 0;
       home_sensor_raw = (HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin) == HOME_SENSOR_ACTIVE) ? 1 : 0;
 
-      // 1. Read ADC Current Sensor (with Moving Average Filter)
+      // 1. Read ADC Current Sensor — DISABLED (PC4 shorted to VCC on PCB)
+      // current_sensor_A = 0.0f;
+      /* TODO: fix PC4/PC5 PCB routing, then re-enable
             if (HAL_ADC_Start(&hadc2) == HAL_OK) {
               if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
                 uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
-
                 static float filtered_adc = 0.0f;
                 static uint8_t is_first_read = 1;
-
                 if (is_first_read) {
                     filtered_adc = (float)raw_adc;
                     is_first_read = 0;
                 } else {
                     filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
                 }
-
-                // แปลงเป็นโวลต์ (ใช้ 3.3V)
                 float v = (filtered_adc / 4095.0f) * 3.3f;
-
-                // คำนวณกระแส โดยใช้ cur_zero_v ที่ได้จากการ Calibrate ตัวเองตอนเปิดเครื่อง
                 float i_a = (v - dev_dash.Sys.cur_zero_v) / dev_dash.Sys.cur_sens;
-
-                if (i_a < 0.0f) i_a = -i_a; // ทำให้กระแสเป็นบวกเสมอ
+                if (i_a < 0.0f) i_a = -i_a;
                 current_sensor_A = i_a;
               }
-
-              // เคลียร์ State ของ ADC ป้องกันอ่านค้างในลูปรอบถัดไป
               HAL_ADC_Stop(&hadc2);
             }
-      // 2. Process incoming Modbus frames (Always ON in Multiplexed mode)
+      */
+      // 2. Joystick UART health — re-arm DMA proactively when RP2040 times out
+      // HAL_UART_ErrorCallback covers framing errors; this covers silent-death
+      {
+        static uint8_t joy_was_alive = 0;
+        uint8_t joy_now_alive = joy_rp2040_alive();
+        if (joy_was_alive && !joy_now_alive) {
+          HAL_UART_AbortReceive(&huart3);
+          HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
+          __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
+        }
+        joy_was_alive = joy_now_alive;
+      }
+
+      // 3. Process incoming Modbus frames (Always ON in Multiplexed mode)
       modbus_process(&mb_slave);
 
       // --- AI Auto-Tuner & Python UI Integration ---
@@ -1124,10 +1142,37 @@ int main(void)
               } else {
                 motor_speed_cmd = 0.0f;
               }
-              if (joy_btn(BTN_L3) && joy_btn(BTN_R3)) current_state = STATE_EMER;
+              if (joy_btn(BTN_LB)) current_state = STATE_EMER;
               if (joy_lt_f() > 0.5f && joy_btn(BTN_X)) { homing_exti_enable(); current_state = STATE_HOMING_FAST; }
+              // T = enter P2P AUTO mode (requires homed)
+              static uint8_t t_prev_idle = 0;
+              if (joy_btn(BTN_T) && !t_prev_idle && homed) current_state = STATE_AUTO;
+              t_prev_idle = joy_btn(BTN_T);
+              // Quick pick/place: LT+A = pick, LT+Y = place (uses seq_delay_s timing)
+              {
+                uint32_t jseq_ticks = (uint32_t)(seq_delay_s * 100.0f);
+                if (jseq_ticks < 1) jseq_ticks = 1;
+                static uint8_t jseq_a_prev = 0, jseq_y_prev = 0;
+                uint8_t lt_a = (joy_lt_f() > 0.5f) && joy_btn(BTN_A);
+                uint8_t lt_y = (joy_lt_f() > 0.5f) && joy_btn(BTN_Y);
+                switch (joy_seq_state) {
+                  case JSEQ_IDLE:
+                    if      (lt_a && !jseq_a_prev) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PK1; }
+                    else if (lt_y && !jseq_y_prev) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);   joy_seq_timer=0; joy_seq_state=JSEQ_PL1; }
+                    break;
+                  case JSEQ_PK1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  joy_seq_timer=0; joy_seq_state=JSEQ_PK2; } break;
+                  case JSEQ_PK2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_SET);  joy_seq_timer=0; joy_seq_state=JSEQ_PK3; } break;
+                  case JSEQ_PK3: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
+                  case JSEQ_PL1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PL2; } break;
+                  case JSEQ_PL2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
+                  default: joy_seq_state = JSEQ_IDLE; break;
+                }
+                jseq_a_prev = lt_a;
+                jseq_y_prev = lt_y;
+              }
             } else {
               motor_speed_cmd = 0.0f;
+              joy_seq_state = JSEQ_IDLE;
             }
             // Modbus command overrides (BaseSystem one-hot mode select)
             if      (mb_slave.registers[0x01] & 0x01) { homing_exti_enable(); current_state = STATE_HOMING_FAST; mb_slave.registers[0x01] = 0; }
@@ -1257,6 +1302,29 @@ int main(void)
               current_state = STATE_IDLE;
               mb_slave.registers[0x25] = 0;
               mb_slave.registers[0x27] = 0;
+            }
+
+            // Joystick in AUTO: LB=EMER, T=abort+hold→IDLE, DPAD L/R=±5° nudge
+            if (joy_is_connected()) {
+              if (joy_btn(BTN_LB)) current_state = STATE_EMER;
+              static uint8_t t_prev_auto = 0;
+              if (joy_btn(BTN_T) && !t_prev_auto) {
+                g_trapezoid.is_active = 0;
+                g_scurve.is_active    = 0;
+                float hold = my_encoder.position_rad;
+                ctrl_direct_target    = hold;
+                ctrl_vel_integral     = 0.0f;
+                ctrl_pos_integral     = 0.0f;
+                dev_dash.Cmd.target_deg = hold * (180.0f / 3.14159265f);
+                current_state = STATE_IDLE;
+              }
+              t_prev_auto = joy_btn(BTN_T);
+              static uint8_t dl_prev = 0, dr_prev = 0;
+              float cur_deg = ctrl_direct_target * (180.0f / 3.14159265f);
+              if (joy_btn(BTN_DPAD_LEFT)  && !dl_prev) start_move_deg(cur_deg + 5.0f);
+              if (joy_btn(BTN_DPAD_RIGHT) && !dr_prev) start_move_deg(cur_deg - 5.0f);
+              dl_prev = joy_btn(BTN_DPAD_LEFT);
+              dr_prev = joy_btn(BTN_DPAD_RIGHT);
             }
             break;
           }
@@ -1555,7 +1623,7 @@ int main(void)
             dev_dash.IO.joy_rt       = joy_rt_f();
             dev_dash.IO.joy_lt       = joy_lt_f();
 
-            dev_dash.Status.state         = current_state;
+            dev_dash.Status.status_state         = current_state;
             dev_dash.Status.motor_cmd     = (current_state == STATE_AUTO)
                                             ? motor_speed_cmd
                                             : ((HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin) == GPIO_PIN_SET) ? safe_speed : -safe_speed);
@@ -1694,7 +1762,7 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Channel = ADC_CHANNEL_2;  // PA1 = ADC2_IN2
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
