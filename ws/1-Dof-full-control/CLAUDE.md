@@ -50,23 +50,30 @@ Key defaults: `encoder_inverted=1`, `homing_backoff_speed=0.20f`, `homing_backof
 PID gains are **separate globals** in `pid_control.c`: `kp_vel=30`, `ki_vel=0.1`, `kd_vel=0.0`, `kp_pos=1.0`
 To tune: edit via Live Expressions OR use Modbus 0x0C-0x0F.
 
-## Recent changes (this session, 2026-05-25)
+## Recent changes (2026-05-25 → 2026-05-26)
 - ESTOP debounce: 200ms solid LOW required before EMER triggers (`estop_debounce`, 20 ticks)
 - RESET debounce: 50ms hold required to clear EMER (`emer_rel_cnt`, 5 ticks)
 - HOMING_BACKOFF: replaced PID with direct PWM right (`homing_backoff_speed = 0.20f`)
 - `encoder_inverted` default changed to `1`
 - `dev_dash` refactored to 6 sub-structs (143 references renamed)
+- MOTOR_DIR moved PC8 → PC7, REED_UP moved PA1 → PA7 (PCB test results)
+- EMER_OUTPUT moved PC6 → PC11 (cleaner routing)
+- USART3 joystick moved PC10/PC11 → PB8/PB9 (PCB layout)
+- USART3 baud set to 460800, DMA1 Ch4 RX added (manual until IOC updated)
 
 ## Pin highlights
 | Pin | Function |
 |-----|----------|
-| PA6 | PWM (TIM3 CH1, 20kHz) |
+| PC9 | PWM (TIM3 CH4, 20kHz) |
+| PA7 | REED_UP (PULLDOWN, active HIGH) |
 | PA8/PA9 | ENC_A/B (TIM1 TI12) |
+| PA15 | ESTOP (PULLUP, LOW=active) |
 | PC3 | HOME_SENSOR (PULLUP, EXTI3 rising, HIGH=detected) |
-| PB13 | ESTOP (PULLUP, LOW=active) |
+| PC7 | MOTOR_DIR (Output) |
+| PC11 | EMER_OUTPUT (Output) |
 | PC13 | RESET_BTN (PULLUP, LOW=active) |
 | PA2/PA3 | LPUART1 Modbus |
-| PC10/PC11 | USART3 Joystick |
+| PB8/PB9 | USART3 Joystick RX/TX |
 
 ## Build & flash
 STM32CubeIDE: **Ctrl+B** to build, **F11** to flash. If IDE shows main.c unsaved after external edits, press **F5** on the file to reload from disk first.

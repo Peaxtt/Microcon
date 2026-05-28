@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>1-DOF PCB Pin Map</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; min-height: 100vh; }
+
+  h1 { text-align: center; padding: 16px; font-size: 1.1rem; color: #aaa; letter-spacing: 2px; }
+
+  /* ── Layout ── */
+  .board-wrap { display: flex; align-items: flex-start; justify-content: center; gap: 0; padding: 10px 20px; }
+  .col { display: flex; flex-direction: column; gap: 4px; padding-top: 32px; }
+  .col.right { padding-top: 32px; }
+
+  .pcb-body {
+    background: #0d2b0d;
+    border: 3px solid #1e5c1e;
+    border-radius: 8px;
+    width: 320px;
+    min-height: 520px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px;
+  }
+
+  /* top power rail */
+  .power-rail {
+    display: flex; gap: 4px; margin-bottom: 8px;
+  }
+  .pwr-pin {
+    width: 34px; height: 28px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.6rem; font-weight: bold; cursor: pointer; transition: all .15s;
+    border: 2px solid transparent;
+  }
+  .pwr-pin:hover { filter: brightness(1.3); border-color: #fff; }
+
+  /* PCB label */
+  .pcb-label { color: #2a7a2a; font-size: 0.7rem; text-align: center; margin-bottom: 4px; }
+
+  /* RP2040 module */
+  .rp2040-block {
+    background: #112211; border: 2px solid #2a6a2a; border-radius: 6px;
+    padding: 8px 16px; margin: 8px 0; text-align: center;
+  }
+  .rp2040-block .chip-label { font-size: 0.65rem; color: #888; }
+  .rp2040-block .chip-name { font-size: 0.8rem; color: #4ade80; margin: 2px 0; }
+  .rp2040-block .chip-sub { font-size: 0.6rem; color: #666; }
+
+  /* CAN module */
+  .can-block {
+    background: #112233; border: 2px solid #2a4a8a; border-radius: 6px;
+    padding: 6px 12px; margin: 4px 0; text-align: center; font-size: 0.65rem; color: #6699cc;
+  }
+
+  .bottom-connectors {
+    margin-top: auto; width: 100%; display: flex; justify-content: space-around;
+    padding: 8px 0 4px;
+  }
+  .bottom-block {
+    background: #1a3a1a; border: 1px solid #2a5a2a; border-radius: 4px;
+    padding: 4px 8px; text-align: center; font-size: 0.6rem; color: #4a8a4a;
+  }
+
+  /* ── Pin buttons ── */
+  .pin-btn {
+    width: 110px; height: 30px; border-radius: 4px; border: 2px solid transparent;
+    cursor: pointer; font-size: 0.7rem; font-weight: 600; transition: all .15s;
+    display: flex; align-items: center; padding: 0 6px; position: relative;
+    background: #222; color: #ccc;
+  }
+  .pin-btn:hover { filter: brightness(1.3); border-color: rgba(255,255,255,0.5) !important; }
+  .pin-btn.active { border-color: #fff !important; filter: brightness(1.4); box-shadow: 0 0 8px currentColor; }
+  .pin-btn.new-badge::after {
+    content: '★'; position: absolute; right: 4px; font-size: 0.6rem; color: #ffd700;
+  }
+
+  .col.left .pin-btn { flex-direction: row-reverse; text-align: right; padding: 0 6px; }
+  .col.left .pin-btn .pname { flex: 1; text-align: right; }
+  .col.right .pin-btn .pname { flex: 1; }
+
+  /* connector dot */
+  .col.left  .pin-btn::after  { content: '●'; position: absolute; right: -10px; font-size: 0.5rem; color: #555; }
+  .col.right .pin-btn::before { content: '●'; position: absolute; left: -10px; font-size: 0.5rem; color: #555; }
+
+  /* ── Colors ── */
+  .c-motor    { background: #1a3a6e; color: #7ab3ff; border-color: #2a5aae !important; }
+  .c-safety   { background: #6e1a1a; color: #ff9999; border-color: #ae2a2a !important; }
+  .c-actuator { background: #5a3a00; color: #ffbb55; border-color: #8a6000 !important; }
+  .c-tower    { background: #3a1a5a; color: #cc99ff; border-color: #6a3a9a !important; }
+  .c-comm     { background: #003a3a; color: #55ddcc; border-color: #008080 !important; }
+  .c-reed     { background: #003a1a; color: #55cc88; border-color: #006633 !important; }
+  .c-can      { background: #1a3a1a; color: #66cc66; border-color: #2a6a2a !important; }
+  .c-sensor   { background: #4a001a; color: #ff7799; border-color: #880033 !important; }
+  .c-power    { background: #333; color: #999; border-color: #555 !important; }
+  .c-indicator{ background: #3a3a00; color: #ffee55; border-color: #6a6a00 !important; }
+  .c-unused   { background: #1e1e1e; color: #555; border-color: #333 !important; }
+
+  /* ── Info panel ── */
+  #info-panel {
+    position: fixed; top: 20px; right: 20px;
+    width: 260px; background: #0d1117; border: 2px solid #333;
+    border-radius: 8px; padding: 16px; font-size: 0.8rem;
+    transition: all .2s; z-index: 100;
+  }
+  #info-panel h2 { font-size: 0.95rem; margin-bottom: 10px; color: #fff; }
+  #info-panel .field { margin: 5px 0; }
+  #info-panel .field span:first-child { color: #888; width: 70px; display: inline-block; }
+  #info-panel .field span.val { font-weight: 600; }
+  #info-panel .note-box {
+    margin-top: 10px; padding: 8px; background: #1a1a2a;
+    border-radius: 4px; font-size: 0.75rem; color: #aaa; border-left: 3px solid #444;
+  }
+  .new-badge-info {
+    display: inline-block; background: #ffd700; color: #000;
+    font-size: 0.65rem; font-weight: bold; padding: 1px 5px; border-radius: 3px;
+    margin-left: 6px;
+  }
+  #info-panel .idle { color: #555; font-style: italic; text-align: center; padding: 20px 0; }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+    padding: 10px 20px 16px;
+  }
+  .leg-item {
+    display: flex; align-items: center; gap: 5px; font-size: 0.68rem;
+    background: #111; border-radius: 4px; padding: 3px 8px; cursor: pointer;
+  }
+  .leg-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  /* show-all button */
+  .ctrl-bar { text-align: center; padding: 6px; }
+  .ctrl-btn {
+    background: #1e3a5a; border: 1px solid #2a5a8a; color: #7ab3ff;
+    border-radius: 4px; padding: 5px 14px; cursor: pointer; font-size: 0.75rem;
+    margin: 0 4px; transition: background .15s;
+  }
+  .ctrl-btn:hover { background: #2a4a6a; }
+  .ctrl-btn.active { background: #2a5a8a; }
+
+  /* phase2 summary */
+  .phase2-table {
+    max-width: 700px; margin: 8px auto 0; font-size: 0.72rem;
+    border-collapse: collapse; width: 100%;
+  }
+  .phase2-table th { background: #1a1a3a; color: #aaa; padding: 5px 10px; text-align: left; }
+  .phase2-table td { padding: 4px 10px; border-bottom: 1px solid #222; }
+  .phase2-table tr:nth-child(even) td { background: #111; }
+  .ph2-old { color: #ff8888; }
+  .ph2-new { color: #88ff88; }
+  .ph2-check { color: #55cc55; font-size: 1rem; }
+  .ph2-title { text-align: center; color: #ffd700; font-size: 0.75rem; padding: 8px; }
+</style>
+</head>
+<body>
+
+<h1>1-DOF Robot — PCB Pin Map (New PCB / Phase 2)</h1>
+
+<div class="ctrl-bar">
+  <button class="ctrl-btn" id="btn-show-all" onclick="toggleShowAll()">แสดงสีทุกพิน</button>
+  <button class="ctrl-btn" onclick="clearAll()">ล้าง</button>
+  <button class="ctrl-btn" onclick="filterNew()">★ แสดงเฉพาะพินใหม่</button>
+</div>
+
+<div class="board-wrap">
+
+  <!-- LEFT PINS -->
+  <div class="col left" id="col-left"></div>
+
+  <!-- PCB BODY -->
+  <div class="pcb-body">
+    <div class="pcb-label">STM32G474RETx PCB — 1DOF Robot</div>
+
+    <!-- top power rail -->
+    <div class="power-rail">
+      <div class="pwr-pin" style="background:#3a1a1a;color:#ff6666;" title="GND">GND</div>
+      <div class="pwr-pin" style="background:#1a1a3a;color:#6688ff;" title="5V">5V</div>
+      <div class="pwr-pin" style="background:#3a1a1a;color:#ff6666;" title="GND">GND</div>
+      <div class="pwr-pin" style="background:#3a2000;color:#ffaa44;" title="3V3">3V3</div>
+      <div class="pwr-pin" style="background:#3a2000;color:#ffaa44;" title="3V3">3V3</div>
+      <div class="pwr-pin" style="background:#3a2000;color:#ffaa44;" title="3V3">3V3</div>
+      <div class="pwr-pin" style="background:#3a2000;color:#ffaa44;" title="3V3">3V3</div>
+    </div>
+
+    <!-- RP2040 -->
+    <div class="rp2040-block">
+      <div class="chip-label">USB-C → Joystick Bridge</div>
+      <div class="chip-name">RP2040-Zero</div>
+      <div class="chip-sub">TX→PC10 / RX←PC11 @ 460800 8N1</div>
+    </div>
+
+    <!-- STM32 chip area -->
+    <div style="flex:1; width:100%; display:flex; align-items:center; justify-content:center;">
+      <div style="border:2px dashed #2a4a2a; border-radius:6px; padding:12px 24px; text-align:center;">
+        <div style="color:#4a8a4a; font-size:0.65rem;">STM32G474RETx</div>
+        <div style="color:#2a6a2a; font-size:0.7rem; margin-top:4px;">@ 170 MHz</div>
+        <div style="color:#335533; font-size:0.6rem; margin-top:2px;">LQFP64</div>
+      </div>
+    </div>
+
+    <!-- CAN module -->
+    <div class="can-block">
+      TJA1050 CAN Transceiver — PA11(RX) / PA12(TX) → CANH / CANL @ 1Mbit/s
+    </div>
+
+    <!-- bottom output blocks -->
+    <div class="bottom-connectors">
+      <div class="bottom-block">PC1<br>POWER<br>LATCH</div>
+      <div class="bottom-block">PB11<br>GRIPPER<br>SOL.</div>
+      <div class="bottom-block">PC6<br>PNEUMATIC<br>SOL.</div>
+    </div>
+  </div>
+
+  <!-- RIGHT PINS -->
+  <div class="col right" id="col-right"></div>
+</div>
+
+<!-- Legend -->
+<div class="legend" id="legend"></div>
+
+<!-- Phase 2 changes table -->
+<div class="ph2-title">★ Phase 2 — Pin Changes (New PCB vs NUCLEO dev board)</div>
+<table class="phase2-table">
+  <tr><th>Signal</th><th>NUCLEO (old)</th><th>New PCB</th><th>Status</th></tr>
+  <tr><td>PWM</td><td class="ph2-old">PA6 / TIM3 CH1</td><td class="ph2-new">PC9 / TIM3 CH4</td><td class="ph2-check">✓ PCB OK — IOC needed</td></tr>
+  <tr><td>TOWER_G</td><td class="ph2-old">PC7</td><td class="ph2-new">PB12</td><td class="ph2-check">✓ PCB OK — IOC needed</td></tr>
+  <tr><td>POWER_BTN</td><td class="ph2-old">PB10</td><td class="ph2-new">PB2</td><td class="ph2-check">✓ PCB OK — IOC needed</td></tr>
+  <tr><td>RESET_LED</td><td class="ph2-old">PB4</td><td class="ph2-new">PB1</td><td class="ph2-check">✓ PCB OK — IOC needed</td></tr>
+  <tr><td>MODE switch</td><td class="ph2-old">PB5</td><td class="ph2-new">PC2</td><td class="ph2-check">✓ PCB OK — IOC needed</td></tr>
+  <tr><td>HOME_SENSOR</td><td class="ph2-old">PC3</td><td class="ph2-new">PC3 (same)</td><td class="ph2-check">✓ No change needed</td></tr>
+  <tr><td>ESTOP</td><td class="ph2-old">PB13</td><td class="ph2-new">PB13 (same)</td><td class="ph2-check">✓ No change needed</td></tr>
+</table>
+<div style="text-align:center; color:#666; font-size:0.68rem; padding:8px 0 16px;">
+  IOC ที่ต้องแก้: PA6→PC9 (TIM3 CH4), PC7→PB12, PB10→PB2, PB4→PB1, PB5→PC2
+</div>
+
+<!-- Info panel -->
+<div id="info-panel">
+  <h2>Pin Info</h2>
+  <div class="idle">คลิกที่พินเพื่อดูข้อมูล</div>
+</div>
+
+<script>
+const PIN_DATA = {
+  // LEFT SIDE (top → bottom)
+  'PD2':    { func:'Unused',              dir:'-',   config:'-',                     color:'unused',    note:'ว่าง — available สำหรับใช้งานในอนาคต', isNew:false },
+  'PC11':   { func:'USART3_RX',           dir:'IN',  config:'460800 8N1',            color:'comm',      note:'Joystick ← RP2040-Zero', isNew:false },
+  'PC10':   { func:'USART3_TX',           dir:'OUT', config:'460800 8N1',            color:'comm',      note:'Joystick → RP2040-Zero', isNew:false },
+  'PC12':   { func:'Unused',              dir:'-',   config:'-',                     color:'unused',    note:'ว่าง — available', isNew:false },
+  'PA15':   { func:'Unused',              dir:'-',   config:'-',                     color:'unused',    note:'ว่าง — available', isNew:false },
+  'GND':    { func:'Ground',              dir:'-',   config:'Common GND',            color:'power',     note:'ต่อ GND ทุกอุปกรณ์ที่ใช้', isNew:false },
+  'PB7':    { func:'TOWER_Y',             dir:'OUT', config:'Push-Pull',             color:'tower',     note:'Tower light สีเหลือง', isNew:false },
+  'PC13':   { func:'RESET_BTN',           dir:'IN',  config:'PULLUP, active LOW',    color:'safety',    note:'ปุ่ม Reset — กดค้าง 50ms เพื่อออกจาก EMER', isNew:false },
+  'PC2':    { func:'MODE',                dir:'IN',  config:'PULLUP, EXTI, active LOW',color:'safety', note:'สวิตช์โหมด: LOW=AUTO, HIGH=MANUAL', isNew:true  },
+  'PC3':    { func:'HOME_SENSOR',         dir:'IN',  config:'PULLUP, EXTI3 rising',  color:'sensor',    note:'เซ็นเซอร์ homing — HIGH=detected (NC contact)', isNew:false },
+  'PC0':    { func:'Unused',              dir:'-',   config:'-',                     color:'unused',    note:'ว่าง — available', isNew:false },
+  'PC1':    { func:'POWER_LATCH',         dir:'OUT', config:'Push-Pull',             color:'actuator',  note:'Cylinder DOWN / power latch', isNew:false },
+  'PB0':    { func:'REED_GRIP',           dir:'IN',  config:'PULLDOWN',              color:'reed',      note:'Reed switch — gripper closed', isNew:false },
+  'PA4':    { func:'REED_DOWN',           dir:'IN',  config:'PULLDOWN',              color:'reed',      note:'Reed switch — cylinder DOWN end-stop', isNew:false },
+  'PA1':    { func:'REED_UP',             dir:'IN',  config:'PULLDOWN',              color:'reed',      note:'Reed switch — cylinder UP end-stop', isNew:false },
+  'PA0':    { func:'MOTOR_DIR',           dir:'OUT', config:'Push-Pull',             color:'motor',     note:'Motor direction output → Cytron MDD3A DIR', isNew:false },
+
+  // RIGHT SIDE (top → bottom)
+  'PC9':    { func:'PWM (TIM3 CH4)',      dir:'OUT', config:'AF2, 20kHz, period=8499',color:'motor',   note:'Motor PWM → Cytron MDD3A PWM', isNew:true  },
+  'PC8':    { func:'TOWER_R',             dir:'OUT', config:'Push-Pull',             color:'tower',     note:'Tower light สีแดง', isNew:false },
+  'PC6':    { func:'PNEUMATIC',           dir:'OUT', config:'Push-Pull',             color:'actuator',  note:'Pneumatic solenoid (via driver)', isNew:false },
+  'PC5':    { func:'LPUART1_RX',          dir:'IN',  config:'19200 8E1 (=PA3 bridge)',color:'comm',    note:'Modbus ← PC (PA3/PC5 share bridge on NUCLEO)', isNew:false },
+  'PB12':   { func:'TOWER_G',             dir:'OUT', config:'Push-Pull',             color:'tower',     note:'Tower light สีเขียว', isNew:true  },
+  'PB11':   { func:'GRIPPER',             dir:'OUT', config:'Push-Pull',             color:'actuator',  note:'Gripper solenoid (via driver)', isNew:false },
+  'PB2':    { func:'POWER_BTN',           dir:'IN',  config:'PULLUP, active LOW',    color:'safety',    note:'ปุ่ม Power', isNew:true  },
+  'PB1':    { func:'RESET_LED',           dir:'OUT', config:'Push-Pull',             color:'indicator', note:'LED ไฟแสดงสถานะ Reset', isNew:true  },
+  'CANH':   { func:'CAN Bus H',           dir:'BUS', config:'1Mbit/s classic CAN',   color:'can',       note:'FDCAN1 via TJA1050 — PA12(TX) internal', isNew:false },
+  'CANL':   { func:'CAN Bus L',           dir:'BUS', config:'1Mbit/s classic CAN',   color:'can',       note:'FDCAN1 via TJA1050 — PA11(RX) internal', isNew:false },
+  'PB15':   { func:'Unused',              dir:'-',   config:'-',                     color:'unused',    note:'ว่าง — available', isNew:false },
+  'PB14':   { func:'EMER_OUTPUT',         dir:'OUT', config:'Push-Pull',             color:'safety',    note:'E-Stop output relay — active ตอน EMER', isNew:false },
+  'PB13':   { func:'ESTOP',               dir:'IN',  config:'PULLUP, 200ms debounce',color:'safety',   note:'Emergency stop — กด LOW ค้าง 200ms → STATE_EMER', isNew:false },
+  'PC4/PA2':{ func:'LPUART1_TX + ADC',   dir:'TX',  config:'19200 8E1 / ADC2_IN5',  color:'comm',      note:'Modbus → PC (PA2) + Current sensor input (PC4)', isNew:false },
+  'PA8':    { func:'ENC_A (TIM1 CH1)',    dir:'IN',  config:'AF6, TIM1 encoder',     color:'motor',     note:'Encoder channel A — 8192 counts/rev', isNew:false },
+  'PA9':    { func:'ENC_B (TIM1 CH2)',    dir:'IN',  config:'AF6, TIM1 encoder',     color:'motor',     note:'Encoder channel B — 8192 counts/rev', isNew:false },
+};
+
+const LEFT_PINS  = ['PD2','PC11','PC10','PC12','PA15','GND','PB7','PC13','PC2','PC3','PC0','PC1','PB0','PA4','PA1','PA0'];
+const RIGHT_PINS = ['PC9','PC8','PC6','PC5','PB12','PB11','PB2','PB1','CANH','CANL','PB15','PB14','PB13','PC4/PA2','PA8','PA9'];
+
+const COLOR_META = {
+  motor:    { hex:'#7ab3ff', bg:'#1a3a6e', label:'Motor / Encoder' },
+  safety:   { hex:'#ff9999', bg:'#6e1a1a', label:'Safety / Control' },
+  actuator: { hex:'#ffbb55', bg:'#5a3a00', label:'Actuators' },
+  tower:    { hex:'#cc99ff', bg:'#3a1a5a', label:'Tower Lights' },
+  comm:     { hex:'#55ddcc', bg:'#003a3a', label:'Communication' },
+  reed:     { hex:'#55cc88', bg:'#003a1a', label:'Reed Switches' },
+  can:      { hex:'#66cc66', bg:'#1a3a1a', label:'CAN Bus' },
+  sensor:   { hex:'#ff7799', bg:'#4a001a', label:'Sensor / ADC' },
+  power:    { hex:'#999',    bg:'#333',    label:'Power / GND' },
+  indicator:{ hex:'#ffee55', bg:'#3a3a00', label:'Indicators' },
+  unused:   { hex:'#555',    bg:'#1e1e1e', label:'Unused' },
+};
+
+let showAllMode = false;
+let activePin = null;
+
+function buildPins(ids, colId) {
+  const col = document.getElementById(colId);
+  ids.forEach(id => {
+    const d = PIN_DATA[id];
+    const btn = document.createElement('div');
+    btn.className = 'pin-btn' + (d.isNew ? ' new-badge' : '');
+    btn.id = 'pin-' + id.replace('/','_');
+    btn.dataset.pin = id;
+    btn.innerHTML = `<span class="pname">${id}</span>`;
+    btn.onclick = () => selectPin(id, btn);
+    col.appendChild(btn);
+  });
+}
+
+function applyColor(btn, pin) {
+  const d = PIN_DATA[pin];
+  const cm = COLOR_META[d.color];
+  btn.style.background = cm.bg;
+  btn.style.color = cm.hex;
+  btn.style.borderColor = cm.hex + '88';
+}
+
+function clearColor(btn) {
+  btn.style.background = '';
+  btn.style.color = '';
+  btn.style.borderColor = '';
+  btn.classList.remove('active');
+}
+
+function selectPin(pin, btn) {
+  if (activePin && activePin !== btn) {
+    if (!showAllMode) clearColor(activePin);
+    activePin.classList.remove('active');
+  }
+  activePin = btn;
+  applyColor(btn, pin);
+  btn.classList.add('active');
+  showInfo(pin);
+}
+
+function showInfo(pin) {
+  const d = PIN_DATA[pin];
+  const cm = COLOR_META[d.color];
+  const panel = document.getElementById('info-panel');
+  panel.style.borderColor = cm.hex;
+  panel.innerHTML = `
+    <h2 style="color:${cm.hex}">${pin} ${d.isNew ? '<span class="new-badge-info">★ NEW</span>' : ''}</h2>
+    <div class="field"><span>Function</span><span class="val" style="color:${cm.hex}">${d.func}</span></div>
+    <div class="field"><span>Direction</span><span class="val">${d.dir}</span></div>
+    <div class="field"><span>Config</span><span class="val">${d.config}</span></div>
+    <div class="field"><span>Category</span><span class="val" style="color:${cm.hex}">${cm.label}</span></div>
+    <div class="note-box">${d.note}</div>
+    ${d.isNew ? '<div style="color:#ffd700;font-size:0.68rem;margin-top:8px;">⚠ ต้องอัพเดท IOC + regen code</div>' : ''}
+  `;
+}
+
+function toggleShowAll() {
+  showAllMode = !showAllMode;
+  document.getElementById('btn-show-all').classList.toggle('active', showAllMode);
+  const all = [...LEFT_PINS, ...RIGHT_PINS];
+  all.forEach(pin => {
+    const btn = document.getElementById('pin-' + pin.replace('/','_'));
+    if (showAllMode) applyColor(btn, pin);
+    else if (btn !== activePin) clearColor(btn);
+  });
+}
+
+function clearAll() {
+  showAllMode = false;
+  document.getElementById('btn-show-all').classList.remove('active');
+  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+    const btn = document.getElementById('pin-' + pin.replace('/','_'));
+    clearColor(btn);
+  });
+  activePin = null;
+  document.getElementById('info-panel').innerHTML = '<h2>Pin Info</h2><div class="idle">คลิกที่พินเพื่อดูข้อมูล</div>';
+  document.getElementById('info-panel').style.borderColor = '#333';
+}
+
+function filterNew() {
+  clearAll();
+  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+    if (PIN_DATA[pin].isNew) {
+      const btn = document.getElementById('pin-' + pin.replace('/','_'));
+      applyColor(btn, pin);
+    }
+  });
+}
+
+function buildLegend() {
+  const leg = document.getElementById('legend');
+  Object.entries(COLOR_META).forEach(([key, cm]) => {
+    const item = document.createElement('div');
+    item.className = 'leg-item';
+    item.innerHTML = `<div class="leg-dot" style="background:${cm.hex}"></div>${cm.label}`;
+    item.onclick = () => {
+      clearAll();
+      [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
+        if (PIN_DATA[pin].color === key) {
+          const btn = document.getElementById('pin-' + pin.replace('/','_'));
+          applyColor(btn, pin);
+        }
+      });
+    };
+    leg.appendChild(item);
+  });
+}
+
+buildPins(LEFT_PINS, 'col-left');
+buildPins(RIGHT_PINS, 'col-right');
+buildLegend();
+
+// Auto show all on load
+toggleShowAll();
+</script>
+</body>
+</html>

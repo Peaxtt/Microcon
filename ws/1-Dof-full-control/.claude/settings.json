@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/PaYae/Studio/FRA263-264_BaseSystem/**)",
+      "Bash(ls \"C:\\\\PaYae\\\\Studio\\\\FRA263-264_BaseSystem\\\\\" 2>/dev/null || dir \"C:\\\\PaYae\\\\Studio\\\\FRA263-264_BaseSystem\\\\\")",
+      "Read(//c/PaYae/Studio/FRA263-264_BaseSystem\" 2>/dev/**)",
+      "PowerShell(pip show uncompyle6 2>$null)",
+      "PowerShell(pip show decompile3 2>$null)",
+      "PowerShell(python -m py_compile --help 2>$null)",
+      "PowerShell(python --version)",
+      "PowerShell(pip install decompile3 2>&1)",
+      "PowerShell(tail -3)",
+      "PowerShell(pip install uncompyle6 2>&1)",
+      "Read(//c/PaYae/**)"
+    ]
+  }
+}

@@ -19,4 +19,18 @@
  */
 void pcb_io_test(UART_HandleTypeDef *huart);
 
+/*
+ * Interactive web-based tester — command loop on LPUART1 (19200 8E1)
+ * เปิด docs/pin_tester.html ใน Chrome แล้วต่อ COM port
+ *
+ * Protocol (newline-delimited ASCII):
+ *   PING            → PONG
+ *   SCAN            → SCAN:ESTOP=1,POWER_BTN=1,...
+ *   SET:TOWER_G:1   → OK
+ *   TOG:TOWER_G     → VAL:TOWER_G=1
+ *   PWM:50          → OK   (0-100%)
+ *   EXIT            → BYE  (return to normal firmware)
+ */
+void pcb_interactive_test(UART_HandleTypeDef *huart);
+
 #endif

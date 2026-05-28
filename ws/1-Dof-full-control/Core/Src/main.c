@@ -53,6 +53,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc2;
+DMA_HandleTypeDef hdma_adc2;
 
 FDCAN_HandleTypeDef hfdcan1;
 
@@ -69,10 +70,11 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim7;
 
 /* USER CODE BEGIN PV */
-uint8_t joy_dma_buf[PKT_LEN * 2];
+uint32_t adc_dma_buf[40];          /* ADC2 circular DMA buffer (PA0 current sensor) */
+uint8_t  joy_dma_buf[PKT_LEN * 2];
 ModbusSlave_t mb_slave;
 
-// (UART4 removed — RP2040 is on USART3/PC10-PC11, PB8/PB9 remain free GPIO)
+// RP2040 joystick → USART3 PB8(RX)/PB9(TX) @ 460800 8N1, DMA1_Ch4
 
 typedef enum {
   STATE_INIT,
@@ -139,6 +141,7 @@ typedef enum {
 static SeqMBState_t seq_mb_state = SEQ_MB_IDLE;
 static uint8_t  seq_mb_pair_idx  = 0;   // current pair index
 static uint32_t seq_mb_timer     = 0;   // 100Hz ticks
+static uint8_t  skip_p2p_entry   = 0;   // set 1 when entering STATE_AUTO from jog/mode cmd
 
 // Test mode state
 typedef enum { TEST_IDLE=0, TEST_GOING_END, TEST_GOING_START } TestState_t;
@@ -151,10 +154,22 @@ typedef enum { JSEQ_IDLE=0, JSEQ_PK1, JSEQ_PK2, JSEQ_PK3, JSEQ_PL1, JSEQ_PL2 } J
 static JoySeqState_t joy_seq_state = JSEQ_IDLE;
 static uint32_t      joy_seq_timer = 0;
 
+// Simple actuator sequence triggered by reg[0x03] (Pick=bit0, Place=bit1)
+typedef enum {
+  ACT_IDLE = 0,
+  ACT_PK_DOWN, ACT_PK_GRIP, ACT_PK_UP,   // pick: down → grip → up
+  ACT_PL_DOWN, ACT  _PL_OPEN, ACT_PL_UP,   // place: down → open → up
+} ActSeqState_t;
+static ActSeqState_t act_seq_state = ACT_IDLE;
+static uint32_t      act_seq_timer = 0;
+static uint32_t      act_seq_timeout = 50;  // 100Hz ticks before forcing next step
+
 // Reed switch states — updated every 100Hz tick (active LOW: 1 = triggered)
 volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
 volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
 volatile uint8_t reed_grip = 0;   // gripper CLOSED
+volatile uint8_t reed_dummy_en      = 0;     // 1 = simulate reed from GPIO output state
+volatile float   reed_dummy_delay_ms = 30.0f; // delay before reed follows output (ms)
 
 // Homing system
 volatile uint8_t home_sensor_raw      = 0;     // 1 = triggered — watch in Live Expressions anytime
@@ -175,9 +190,12 @@ volatile float   g_distff_tau_d   = 0.0f;   // disturbance estimate input (from 
 
 // ── Motor + Encoder direction invert ─────────────────────────────────────────
 volatile uint8_t motor_dir_inverted    = 0;     // 1 = flip PID PWM output
-volatile uint8_t encoder_inverted      = 1;     // 1 = flip encoder count direction
+volatile uint8_t encoder_inverted      = 0;     // 1 = flip encoder count direction
+volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST (tunable live)
 volatile float   homing_backoff_speed  = 0.20f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
+volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
+volatile float   homing_slow_speed     = 0.06f; // PWM fraction for HOMING_SLOW (tunable live)
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -247,9 +265,10 @@ typedef struct {
   uint8_t  in_estop;          uint8_t  in_mode;
   uint8_t  in_reset;          uint8_t  in_power;
   uint8_t  out_pwm;           uint8_t  out_dir;
-  uint8_t  out_pneumatic;     uint8_t  out_gripper;
-  uint8_t  out_tower_g;       uint8_t  out_tower_y;  uint8_t  out_tower_r;
+  uint8_t  out_power_latch;   uint8_t  out_pneumatic;  uint8_t  out_gripper;
+  uint8_t  out_tower_g;       uint8_t  out_tower_y;    uint8_t  out_tower_r;
   uint8_t  out_reset_led;     uint8_t  out_emer;
+  uint8_t  reed_up;           uint8_t  reed_down;      uint8_t  reed_grip;
   uint8_t  joy_connected;     float    joy_ly;
   float    joy_lt;            float    joy_rt;
   uint16_t joy_buttons;
@@ -383,8 +402,8 @@ static void finish_homing(void) {
 // Returns 0 if rejected by soft limit, 1 if started.
 static void start_move_deg(float deg)
 {
-  // Soft limit: reject if target exceeds ±540° from home (only when homed)
-  if (homed && (deg > MAX_ANGLE_DEG || deg < MIN_ANGLE_DEG)) return;
+  // Soft limit: 0–359.99° circular range (only when homed)
+  if (homed && (deg > 359.99f || deg < 0.0f)) return;
   ctrl_vel_integral = 0.0f;
   ctrl_pos_integral = 0.0f;
   float target_rad  = deg * (3.14159265f / 180.0f);
@@ -458,7 +477,8 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+
+	HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -488,8 +508,16 @@ int main(void)
    * Open terminal 115200 8N1. Function blocks at the end; reflash after.
    * To switch tests: comment one line, uncomment the other.
    * ----------------------------------------------------------------------- */
-  pcb_io_test(&hlpuart1);
+  // pcb_io_test(&hlpuart1);           /* sequential terminal test */
   // pin_short_test(&hlpuart1);
+
+  /* Init joystick + PWM before pcb_interactive_test (which blocks) */
+  joystick_init(&huart3);
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
+  __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+
+  //pcb_interactive_test(&hlpuart1);    /* web UI — เปิด docs/pin_tester.html */
 
   // EMER (ESTOP_Pin PB13): active LOW, PULLUP — polled in 100Hz loop
   // MODE selector: PULLUP (LOW=AUTO, HIGH=MANUAL)
@@ -514,7 +542,7 @@ int main(void)
   HAL_TIM_Encoder_Start(&htim1, TIM_CHANNEL_ALL);
   __HAL_TIM_SET_COUNTER(&htim1, 0);
   Encoder_Init(&my_encoder, LOOP_DT);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
   
   // Start the 1kHz Control Loop
   HAL_TIM_Base_Start_IT(&htim7);
@@ -533,27 +561,22 @@ int main(void)
 
   current_state = STATE_IDLE;
   mb_slave.registers[0x00] = 22881; // Initialize Heartbeat (YA)
+  // Sys params initial values — readable+writable by Modbus
+  mb_slave.registers[0x33] = (uint16_t)dev_dash.Sys.mode;
+  mb_slave.registers[0x34] = (uint16_t)(dev_dash.Sys.max_speed  * 100.0f);
+  mb_slave.registers[0x35] = (uint16_t)(dev_dash.Sys.ramp_rate  * 1000.0f);
+  mb_slave.registers[0x36] = (uint16_t)encoder_inverted;
   
-  // Calibrate ADC2 before using it
+  // Calibrate + start ADC2 DMA (circular, feeds adc_dma_buf continuously)
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
-  
-  	// =======================================================
-    // Auto-Zero Calibration:
-    // =======================================================
-    float sum_voltage = 0.0f;
-    for (int i = 0; i < 100; i++) {
-        if (HAL_ADC_Start(&hadc2) == HAL_OK) {
-            if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
-                uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
-                float temp_v = ((float)raw_adc / 4095.0f) * 3.3f;
-                sum_voltage += temp_v;
-            }
-            HAL_ADC_Stop(&hadc2);
-        }
-        HAL_Delay(2); // รอ 2ms
-    }
-    dev_dash.Sys.cur_zero_v = sum_voltage / 100.0f; // ตั้งค่า Zero แบบ Real-time
-    // =======================================================
+  HAL_ADC_Start_DMA(&hadc2, adc_dma_buf, 40);
+  HAL_Delay(100); // let buffer fill (~2.4ms/cycle, 100ms >> enough)
+  // Auto-zero: average current DMA buffer as zero-current offset
+  {
+    uint32_t zsum = 0;
+    for (int i = 0; i < 40; i++) zsum += adc_dma_buf[i];
+    dev_dash.Sys.cur_zero_v = ((float)(zsum / 40u) / 4095.0f) * 3.3f;
+  }
 
   printf("\r\n=== 1-DOF Robot System Ready ===\r\n");
 
@@ -592,51 +615,67 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    modbus_process(&mb_slave); // Run every loop — respond immediately, not gated by 10ms flag
+
     if (flag_10ms) {
       flag_10ms = 0;
-      
+
       // 0. Robust ESTOP Polling (Anti-EMI Noise)
       static uint8_t estop_debounce = 0;
       if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
         if (estop_debounce < 25) estop_debounce++;
         if (estop_debounce >= 20) { // Requires 200ms of solid LOW signal to trigger
           current_state = STATE_EMER;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, GPIO_PIN_SET);
         }
       } else {
         estop_debounce = 0;
       }
       
-      // 0.5. Reed Switch State (NC contact, COM=3V3, PULLDOWN → active LOW)
-      reed_up   = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port,   REED_UP_Pin)   == REED_ACTIVE) ? 1 : 0;
-      reed_down = (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == REED_ACTIVE) ? 1 : 0;
-      reed_grip = (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == REED_ACTIVE) ? 1 : 0;
+      // 0.5. Reed Switch State
+      if (!reed_dummy_en) {
+        // Real hardware: NC contact, COM=3V3, PULLDOWN → active LOW
+        reed_up   = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port,   REED_UP_Pin)   == REED_ACTIVE) ? 1 : 0;
+        reed_down = (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == REED_ACTIVE) ? 1 : 0;
+        reed_grip = (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == REED_ACTIVE) ? 1 : 0;
+      } else {
+        // Dummy mode: mirror GPIO output state after reed_dummy_delay_ms
+        static uint8_t  last_pneu = 0xFF, last_grip_out = 0xFF;
+        static uint32_t pneu_timer = 0, grip_timer = 0;
+        static uint8_t  pneu_pend  = 0, grip_pend   = 0;
+        uint32_t delay_ticks = (uint32_t)(reed_dummy_delay_ms / 10.0f + 0.5f);
+        if (delay_ticks < 1) delay_ticks = 1;
+
+        uint8_t cur_pneu = (HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin) == GPIO_PIN_SET) ? 1 : 0;
+        uint8_t cur_grip = (HAL_GPIO_ReadPin(GRIPPER_GPIO_Port,     GRIPPER_Pin)     == GPIO_PIN_SET) ? 1 : 0;
+
+        if (last_pneu == 0xFF) { // first tick after enable — snapshot immediately, no delay
+          last_pneu = cur_pneu; reed_down = cur_pneu; reed_up = !cur_pneu;
+        } else if (cur_pneu != last_pneu) { last_pneu = cur_pneu; pneu_pend = 1; pneu_timer = 0; }
+        if (pneu_pend && ++pneu_timer >= delay_ticks) {
+          pneu_pend = 0; reed_down = cur_pneu; reed_up = !cur_pneu;
+        }
+
+        if (last_grip_out == 0xFF) { // first tick — snapshot immediately
+          last_grip_out = cur_grip; reed_grip = cur_grip;
+        } else if (cur_grip != last_grip_out) { last_grip_out = cur_grip; grip_pend = 1; grip_timer = 0; }
+        if (grip_pend && ++grip_timer >= delay_ticks) {
+          grip_pend = 0; reed_grip = cur_grip;
+        }
+      }
       home_sensor_raw = (HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin) == HOME_SENSOR_ACTIVE) ? 1 : 0;
 
-      // 1. Read ADC Current Sensor — DISABLED (PC4 shorted to VCC on PCB)
-      // current_sensor_A = 0.0f;
-      /* TODO: fix PC4/PC5 PCB routing, then re-enable
-            if (HAL_ADC_Start(&hadc2) == HAL_OK) {
-              if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK) {
-                uint16_t raw_adc = HAL_ADC_GetValue(&hadc2);
-                static float filtered_adc = 0.0f;
-                static uint8_t is_first_read = 1;
-                if (is_first_read) {
-                    filtered_adc = (float)raw_adc;
-                    is_first_read = 0;
-                } else {
-                    filtered_adc = (filtered_adc * 7.0f + (float)raw_adc) / 8.0f;
-                }
-                float v = (filtered_adc / 4095.0f) * 3.3f;
-                float i_a = (v - dev_dash.Sys.cur_zero_v) / dev_dash.Sys.cur_sens;
-                if (i_a < 0.0f) i_a = -i_a;
-                current_sensor_A = i_a;
-              }
-              HAL_ADC_Stop(&hadc2);
-            }
-      */
+      // 1. Read current sensor — average DMA circular buffer (ADC2 PA0)
+      {
+        uint32_t asum = 0;
+        for (int i = 0; i < 40; i++) asum += adc_dma_buf[i];
+        float v = ((float)(asum / 40u) / 4095.0f) * 3.3f;
+        float i_a = (v - dev_dash.Sys.cur_zero_v) / dev_dash.Sys.cur_sens;
+        if (i_a < 0.0f) i_a = -i_a;
+        current_sensor_A = i_a;
+      }
       // 2. Joystick UART health — re-arm DMA proactively when RP2040 times out
       // HAL_UART_ErrorCallback covers framing errors; this covers silent-death
       {
@@ -714,7 +753,7 @@ int main(void)
       // Reg 25: STOP — หยุดทันที ค้างตำแหน่งปัจจุบัน (ไม่เข้า EMER)
       if (mb_slave.registers[25] == 1) {
         mb_slave.registers[25] = 0;
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // PWM = 0 ทันที
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0); // PWM = 0 ทันที
         g_trapezoid.is_active = 0;
         g_scurve.is_active    = 0;
         ctrl_vel_integral     = 0.0f;
@@ -734,8 +773,13 @@ int main(void)
                                  (reed_down ? 2 : 0) |
                                  (reed_grip ? 4 : 0);
       
-      // Position: degrees × 10 (signed int16) — BaseSystem divides by 10 for display
-      mb_slave.registers[0x28] = (int16_t)(my_encoder.position_rad * (180.0f / 3.14159265f) * 10.0f);
+      // Position: wrapped 0-359.99° × 10 — BaseSystem divides by 10 for display
+      {
+        float _pd = my_encoder.position_rad * (180.0f / 3.14159265f);
+        _pd = fmodf(_pd, 360.0f);
+        if (_pd < 0.0f) _pd += 360.0f;
+        mb_slave.registers[0x28] = (int16_t)(_pd * 10.0f);
+      }
       // Velocity: deg/s × 10
       mb_slave.registers[0x29] = (int16_t)(vel_filtered * (180.0f / 3.14159265f) * 10.0f);
       // Acceleration: deg/s² × 10
@@ -744,7 +788,24 @@ int main(void)
       mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) ? 1 : 0;
       // Current sensor moved to 0x3A (clear of BaseSystem register map)
       mb_slave.registers[0x3A] = (uint16_t)(current_sensor_A * 1000.0f);
-      
+      // reg[0x32]: Digital IO status — bit0=HOME_SENSOR, bit1=POWER_BTN, bit2=RESET_BTN, bit3=MODE(1=MANUAL)
+      mb_slave.registers[0x32] =
+          (home_sensor_raw ? 0x01 : 0) |
+          ((HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port,  POWER_BTN_Pin)  == GPIO_PIN_RESET) ? 0x02 : 0) |
+          ((HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port,  RESET_BTN_Pin)  == GPIO_PIN_RESET) ? 0x04 : 0) |
+          ((HAL_GPIO_ReadPin(MODE_GPIO_Port,        MODE_Pin)       == GPIO_PIN_SET)   ? 0x08 : 0);
+      // reg[0x33-0x36]: Sys params — R/W, host writes → applied each cycle
+      if (mb_slave.registers[0x33] <= 3)
+          dev_dash.Sys.mode      = (SystemMode_t)mb_slave.registers[0x33];
+      else mb_slave.registers[0x33] = (uint16_t)dev_dash.Sys.mode;
+      if (mb_slave.registers[0x34] >= 1 && mb_slave.registers[0x34] <= 100)
+          dev_dash.Sys.max_speed = (float)mb_slave.registers[0x34] / 100.0f;
+      else mb_slave.registers[0x34] = (uint16_t)(dev_dash.Sys.max_speed * 100.0f);
+      if (mb_slave.registers[0x35] >= 1 && mb_slave.registers[0x35] <= 500)
+          dev_dash.Sys.ramp_rate = (float)mb_slave.registers[0x35] / 1000.0f;
+      else mb_slave.registers[0x35] = (uint16_t)(dev_dash.Sys.ramp_rate * 1000.0f);
+      encoder_inverted = (uint8_t)(mb_slave.registers[0x36] & 0x01);
+
       // Heartbeat Logic
       static uint32_t hb_timer = 0;
       hb_timer++;
@@ -773,9 +834,9 @@ int main(void)
       float safe_speed = 0.0f; // stays 0 when EMER active
       uint8_t emer_active = (current_state == STATE_EMER);
       if (emer_active) {
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
         HAL_GPIO_WritePin(TOWER_R_GPIO_Port,     TOWER_R_Pin,     GPIO_PIN_SET);
-        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_SET);
         mb_slave.registers[0x27] = 0;
         motor_speed_cmd = 0.0f;
@@ -803,7 +864,7 @@ int main(void)
           mb_slave.registers[0x24]  = 0;
           mb_slave.registers[0x01]  = 0;
           HAL_GPIO_WritePin(TOWER_R_GPIO_Port,     TOWER_R_Pin,     GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
           HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_RESET);
           if (dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
             GPIO_PinState mode_now = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
@@ -821,7 +882,7 @@ int main(void)
         }
         if (dev_dash.Cmd.set_home) {
           // Zero PWM immediately BEFORE disabling IRQ (hardware register — instant)
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
           __disable_irq();
           dev_dash.Cmd.set_home       = 0;
           enc_reset_pending            = 1;
@@ -843,6 +904,7 @@ int main(void)
           dev_dash.Status.pos_err        = 0.0f;
           vel_filtered                 = 0.0f;
           __enable_irq();
+          home_offset_deg = cumulative_angle_deg; // save position before zeroing — used for auto-move after re-homing
           homed           = 1;
           cumulative_angle_deg = 0.0f;
           RefFF_Reset(&my_refff);
@@ -865,7 +927,7 @@ int main(void)
         HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, dev_dash.Test.force_tower_g ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_GPIO_WritePin(TOWER_Y_GPIO_Port, TOWER_Y_Pin, dev_dash.Test.force_tower_y ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_GPIO_WritePin(TOWER_R_GPIO_Port, TOWER_R_Pin, dev_dash.Test.force_tower_r ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Test.force_emer ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, dev_dash.Test.force_emer ? GPIO_PIN_RESET : GPIO_PIN_SET);
         
         // Apply Forced Motor Speed
         safe_speed = dev_dash.Test.force_motor;
@@ -878,7 +940,7 @@ int main(void)
           HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
           safe_speed = -safe_speed;
         }
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint32_t)(safe_speed * (float)htim3.Init.Period));
 
       } else if (dev_dash.Sys.mode == SYS_MODE_JOYSTICK_TEST) {
 
@@ -984,8 +1046,8 @@ int main(void)
           }
           y_prev = joy_btn(BTN_Y);
 
-          // Face button A = EMER OUTPUT
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, joy_btn(BTN_A) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+          // Face button A = EMER OUTPUT (press A = trigger emergency = LOW)
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, joy_btn(BTN_A) ? GPIO_PIN_RESET : GPIO_PIN_SET);
 
           // DPAD Up/Down = Lights,  Left/Right = fine tune motor
           HAL_GPIO_WritePin(TOWER_G_GPIO_Port, TOWER_G_Pin, joy_btn(BTN_DPAD_UP)   ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -1028,12 +1090,12 @@ int main(void)
             safe_speed = -safe_speed;
           }
           if (safe_speed > 1.0f) safe_speed = 1.0f;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint32_t)(safe_speed * (float)htim3.Init.Period));
 
         } else {
           // Safe state if joystick disconnects during test
           seq_state = SEQ_IDLE;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
           HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET);
         }
@@ -1068,7 +1130,7 @@ int main(void)
         safe_speed = auto_ramp;
         HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin,
                           auto_test_dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint32_t)(safe_speed * (float)htim3.Init.Period));
 
       } else {
 
@@ -1110,6 +1172,69 @@ int main(void)
 
         // ── Global Commands (ทำงานทุก state) ─────────────────────────────────
 
+        // reg[0x05] jog — works from ANY non-EMER/HOMING state, no tab switch needed
+        {
+          int16_t jog_g = (int16_t)mb_slave.registers[0x05];
+          if (jog_g != 0 &&
+              current_state != STATE_EMER &&
+              current_state != STATE_HOMING_FAST &&
+              current_state != STATE_HOMING_BACKOFF &&
+              current_state != STATE_HOMING_SLOW) {
+            float pos_now     = my_encoder.position_rad;
+            float pos_now_deg = pos_now * (180.0f / 3.14159265f);
+            float pos_wrapped = fmodf(pos_now_deg, 360.0f);
+            if (pos_wrapped < 0.0f) pos_wrapped += 360.0f;
+            float target_deg  = pos_wrapped + (float)jog_g;
+            if (target_deg > 359.99f) target_deg = 359.99f;
+            if (target_deg <   0.0f)  target_deg =   0.0f;
+            float target_rad  = target_deg * (3.14159265f / 180.0f);
+            float delta_rad   = target_rad - pos_now;
+            ctrl_traj_start    = pos_now;
+            ctrl_direct_target = target_rad;
+            ctrl_vel_integral  = 0.0f;
+            ctrl_pos_integral  = 0.0f;
+            g_scurve.v_max = fabsf(dev_dash.Traj.v_max);
+            g_scurve.a_max = fabsf(dev_dash.Traj.a_max);
+            g_scurve.j_max = fabsf(dev_dash.Traj.j_max);
+            SCurve_SetTarget(&g_scurve, delta_rad);
+            skip_p2p_entry = 1;
+            current_state  = STATE_AUTO;
+            mb_slave.registers[0x27] = 0x08;
+            mb_slave.registers[0x05] = 0;
+          }
+        }
+
+        // reg[0x01] mode commands — work from ANY state (not just IDLE)
+        // HOME/JOG/AUTO can be pressed without pressing STOP first
+        if (current_state != STATE_EMER &&
+            current_state != STATE_HOMING_FAST &&
+            current_state != STATE_HOMING_BACKOFF &&
+            current_state != STATE_HOMING_SLOW) {
+          uint16_t mode_cmd = mb_slave.registers[0x01];
+          if (mode_cmd & 0x01) {  // HOME
+            g_scurve.is_active    = 0;
+            g_trapezoid.is_active = 0;
+            motor_speed_cmd       = 0.0f;
+            ctrl_vel_integral     = 0.0f;
+            ctrl_pos_integral     = 0.0f;
+            homing_exti_enable();
+            current_state = STATE_HOMING_FAST;
+            mb_slave.registers[0x01] = 0;
+          } else if (mode_cmd & 0x02) {  // JOG/MANUAL
+            current_state = STATE_MANUAL;
+            mb_slave.registers[0x01] = 0;
+          } else if (mode_cmd & 0x04) {  // AUTO
+            if (homed) { skip_p2p_entry = 1; current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
+            mb_slave.registers[0x01] = 0;
+          } else if (mode_cmd & 0x08) {  // SET HOME
+            dev_dash.Cmd.set_home = 1;
+            mb_slave.registers[0x01] = 0;
+          } else if (mode_cmd & 0x10) {  // TEST
+            if (homed) { current_state = STATE_TEST; test_state = TEST_GOING_END; test_mv_armed = 1; test_repeat = (int16_t)mb_slave.registers[0x11]; }
+            mb_slave.registers[0x01] = 0;
+          }
+        }
+
         // Cancel / Emergency Stop — หยุดทันที + STATE_EMER + ต้องกด RESET ถึงสั่งใหม่ได้
         if (dev_dash.Cmd.cancel_move) {
           dev_dash.Cmd.cancel_move = 0;
@@ -1121,11 +1246,11 @@ int main(void)
           // Atomic: ป้องกัน ISR override PWM ระหว่าง transition
           __disable_irq();
           current_state = STATE_EMER;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
           __enable_irq();
           HAL_GPIO_WritePin(RESET_LED_GPIO_Port,   RESET_LED_Pin,   GPIO_PIN_SET);
           HAL_GPIO_WritePin(TOWER_R_GPIO_Port,     TOWER_R_Pin,     GPIO_PIN_SET);
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
+          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
         }
 
         // ── Execute State Machine ─────────────────────────────────────────────
@@ -1157,14 +1282,14 @@ int main(void)
                 uint8_t lt_y = (joy_lt_f() > 0.5f) && joy_btn(BTN_Y);
                 switch (joy_seq_state) {
                   case JSEQ_IDLE:
-                    if      (lt_a && !jseq_a_prev) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PK1; }
-                    else if (lt_y && !jseq_y_prev) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);   joy_seq_timer=0; joy_seq_state=JSEQ_PL1; }
+                    if      (lt_a && !jseq_a_prev) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,   GRIPPER_Pin,   GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PK1; }
+                    else if (lt_y && !jseq_y_prev) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);   joy_seq_timer=0; joy_seq_state=JSEQ_PL1; }
                     break;
-                  case JSEQ_PK1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  joy_seq_timer=0; joy_seq_state=JSEQ_PK2; } break;
-                  case JSEQ_PK2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_SET);  joy_seq_timer=0; joy_seq_state=JSEQ_PK3; } break;
-                  case JSEQ_PK3: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
-                  case JSEQ_PL1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PL2; } break;
-                  case JSEQ_PL2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
+                  case JSEQ_PK1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);   joy_seq_timer=0; joy_seq_state=JSEQ_PK2; } break;
+                  case JSEQ_PK2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,   GRIPPER_Pin,   GPIO_PIN_SET);   joy_seq_timer=0; joy_seq_state=JSEQ_PK3; } break;
+                  case JSEQ_PK3: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
+                  case JSEQ_PL1: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(GRIPPER_GPIO_Port,   GRIPPER_Pin,   GPIO_PIN_RESET); joy_seq_timer=0; joy_seq_state=JSEQ_PL2; } break;
+                  case JSEQ_PL2: if (++joy_seq_timer >= jseq_ticks) { HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET);                  joy_seq_state=JSEQ_IDLE; } break;
                   default: joy_seq_state = JSEQ_IDLE; break;
                 }
                 jseq_a_prev = lt_a;
@@ -1174,23 +1299,11 @@ int main(void)
               motor_speed_cmd = 0.0f;
               joy_seq_state = JSEQ_IDLE;
             }
-            // Modbus command overrides (BaseSystem one-hot mode select)
-            if      (mb_slave.registers[0x01] & 0x01) { homing_exti_enable(); current_state = STATE_HOMING_FAST; mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x02) { current_state = STATE_MANUAL;    mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x04) {
-              if (homed) { current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
-              mb_slave.registers[0x01] = 0;
-            }
-            else if (mb_slave.registers[0x01] & 0x08) { dev_dash.Cmd.set_home = 1; mb_slave.registers[0x01] = 0; }
-            else if (mb_slave.registers[0x01] & 0x10) {
-              if (homed) { current_state = STATE_TEST; test_state = TEST_GOING_END; test_mv_armed = 1; test_repeat = (int16_t)mb_slave.registers[0x11]; }
-              mb_slave.registers[0x01] = 0;
-            }
             break;
             
           case STATE_HOMING_FAST:
             mb_slave.registers[0x27] = 0x01;
-            motor_speed_cmd = -HOMING_FAST_SPEED; // direct PWM left
+            motor_speed_cmd = -homing_fast_speed; // direct PWM left
             if (homing_sensor_flag) {
               homing_sensor_flag = 0;
               motor_speed_cmd    = 0.0f;
@@ -1215,53 +1328,42 @@ int main(void)
 
           case STATE_HOMING_SLOW:
             mb_slave.registers[0x27] = 0x01;
-            motor_speed_cmd = -HOMING_SLOW_SPEED; // direct PWM very slow left
+            motor_speed_cmd = -homing_slow_speed; // direct PWM very slow left
             if (homing_sensor_flag) {
               homing_sensor_flag = 0;
               motor_speed_cmd    = 0.0f;
               finish_homing();   // zeros encoder, resets cumulative, state→IDLE
+              if (home_offset_deg != 0.0f) {
+                dev_dash.Cmd.target_deg = home_offset_deg;
+                dev_dash.Cmd.start_move = 1;
+                current_state = STATE_AUTO;
+              }
             }
             if (joy_is_connected() && joy_btn(BTN_LB)) current_state = STATE_EMER;
             break;
             
           case STATE_MANUAL:
-            mb_slave.registers[0x27] = 0; // Idle/Manual
-            if (joy_is_connected()) {
-              if (joy_btn(BTN_LB)) current_state = STATE_EMER;
-              // X = cylinder down, Y = cylinder up, A = gripper close, B = gripper open
-              HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin,
-                                joy_btn(BTN_X) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-              if (joy_btn(BTN_A)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
-              if (joy_btn(BTN_B)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
-              
-              if (joy_rt_f() > 0.5f) {
-                motor_speed_cmd = joy_ly_f();
-              } else if (joy_btn(BTN_DPAD_LEFT)) {
-                motor_speed_cmd =  (fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
-              } else if (joy_btn(BTN_DPAD_RIGHT)) {
-                motor_speed_cmd = -(fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
+            mb_slave.registers[0x27] = 0;
+            {
+              // reg[0x05] jog is handled globally before state machine
+              if (joy_is_connected()) {
+                if (joy_btn(BTN_LB)) current_state = STATE_EMER;
+                // X = cylinder down (PNEUMATIC), A = gripper close, B = gripper open
+                HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin,
+                                  joy_btn(BTN_X) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                if (joy_btn(BTN_A)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
+                if (joy_btn(BTN_B)) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+                if (joy_rt_f() > 0.5f) {
+                  motor_speed_cmd = joy_ly_f();
+                } else if (joy_btn(BTN_DPAD_LEFT)) {
+                  motor_speed_cmd =  (fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
+                } else if (joy_btn(BTN_DPAD_RIGHT)) {
+                  motor_speed_cmd = -(fine_tune_speed > 0.01f ? fine_tune_speed : 0.01f);
+                } else {
+                  motor_speed_cmd = 0.0f;
+                  if (joy_ly_f() == 0.0f) current_state = STATE_IDLE;
+                }
               } else {
-                motor_speed_cmd = 0.0f;
-                if (joy_ly_f() == 0.0f) current_state = STATE_IDLE;
-              }
-            } else {
-              // Modbus Jog: signed degrees → S-curve incremental move
-              int16_t jog_cmd = (int16_t)mb_slave.registers[0x05];
-              if (jog_cmd != 0) {
-                float jog_rad = (float)jog_cmd * (3.14159265f / 180.0f);
-                float pos_now = my_encoder.position_rad;
-                ctrl_traj_start   = pos_now;
-                ctrl_direct_target = pos_now + jog_rad;
-                ctrl_vel_integral  = 0.0f;
-                ctrl_pos_integral  = 0.0f;
-                g_scurve.v_max = dev_dash.Traj.v_max;
-                g_scurve.a_max = dev_dash.Traj.a_max;
-                g_scurve.j_max = dev_dash.Traj.j_max;
-                SCurve_SetTarget(&g_scurve, jog_rad);
-                current_state = STATE_AUTO;
-                mb_slave.registers[0x27] = 0x08; // Go Point
-                mb_slave.registers[0x05] = 0;
-              } else if ((mb_slave.registers[0x01] & 0x02) == 0) {
                 current_state = STATE_IDLE;
               }
             }
@@ -1286,7 +1388,11 @@ int main(void)
             {
               static float last_mb_target = -99999.0f;
               float mb_target_deg = (float)(int16_t)mb_slave.registers[0x24];
-              if (dev_dash.Cmd.start_move) {
+              if (skip_p2p_entry) {
+                // Entered from jog/mode cmd — sync last target without moving
+                last_mb_target  = mb_target_deg;
+                skip_p2p_entry  = 0;
+              } else if (dev_dash.Cmd.start_move) {
                 dev_dash.Cmd.start_move = 0;
                 start_move_deg(dev_dash.Cmd.target_deg);
               } else if (mb_target_deg != last_mb_target) {
@@ -1352,8 +1458,10 @@ int main(void)
                 if (seq_mb_timer == 0) start_move_deg(pick_deg);
                 seq_mb_timer = 1;
                 if (traj_done) {
-                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); // open
-                  HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);   // down
+                  // Open gripper only if not already open (RESET = open)
+                  if (HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin) != GPIO_PIN_RESET)
+                    HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); // down
                   seq_mb_timer = 0;
                   seq_mb_state = SEQ_MB_PICKING;
                 }
@@ -1366,7 +1474,7 @@ int main(void)
                   HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
                 } else if (seq_mb_timer > seq_ticks_mb) {
                   if (reed_grip || seq_mb_timer > seq_ticks_mb * 3) {
-                    HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET); // up
+                    HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); // up
                     seq_mb_timer = 0;
                     seq_mb_state = SEQ_MB_GOING_PLACE;
                   }
@@ -1379,7 +1487,7 @@ int main(void)
                 if (seq_mb_timer == 0) start_move_deg(place_deg);
                 seq_mb_timer = 1;
                 if (traj_done) {
-                  HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET); // down
+                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); // down
                   seq_mb_timer = 0;
                   seq_mb_state = SEQ_MB_PLACING;
                 }
@@ -1392,7 +1500,7 @@ int main(void)
                   HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
                 } else if (seq_mb_timer > seq_ticks_mb) {
                   if (!reed_grip || seq_mb_timer > seq_ticks_mb * 3) {
-                    HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET); // up
+                    HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); // up
                     seq_mb_pair_idx++;
                     if (seq_mb_pair_idx >= pairs) {
                       seq_mb_state = SEQ_MB_IDLE;
@@ -1414,7 +1522,7 @@ int main(void)
               g_scurve.is_active    = 0;
               g_trapezoid.is_active = 0;
               seq_mb_state  = SEQ_MB_IDLE;
-              HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_RESET);
+              HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); // raise on abort
               current_state = STATE_IDLE;
               mb_slave.registers[0x25] = 0;
               mb_slave.registers[0x27] = 0;
@@ -1478,32 +1586,128 @@ int main(void)
             break;
         }
         
-        // Modbus Actuator Control (BaseSystem register map)
-        if (!joy_is_connected()) {
-          // 0x02: Manual gripper — only when sequence is idle (avoid fighting automation)
-          if (seq_mb_state == SEQ_MB_IDLE) {
+        // Modbus Actuator Control (BaseSystem register map) — runs in AUTO regardless of joystick
+        {
+          // 0x02: Manual actuator — only when no actuator sequence is running
+          // Per-bit edge detection: changing OPEN/CLOSE must NOT affect UP/DOWN
+          if (seq_mb_state == SEQ_MB_IDLE && act_seq_state == ACT_IDLE) {
+            static uint16_t prev_grip_cmd = 0x0000;
             uint16_t grip_cmd = mb_slave.registers[0x02];
-            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin,
-                              (grip_cmd & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-            if      (grip_cmd & 0x02) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
-            else if (grip_cmd & 0x04) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);
+            if (grip_cmd != prev_grip_cmd) {
+              // BaseSystem sends one-hot values: 0x01=DOWN, 0x00=UP, 0x02=OPEN, 0x04=CLOSE
+              // If new value has gripper bits set → gripper-only command, leave cylinder alone
+              // If new value has NO gripper bits → cylinder command (bit0 = state)
+              if (grip_cmd & 0x06) {
+                if (grip_cmd & 0x02) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); // OPEN
+                if (grip_cmd & 0x04) HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET);   // CLOSE
+              } else {
+                HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin,
+                                  (grip_cmd & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+              }
+              prev_grip_cmd = grip_cmd;
+            }
           }
 
-          // 0x03: Sequence trigger — bit0=Pick, bit1=Place (edge-triggered, auto-clear)
-          static uint16_t seq3_prev = 0;
-          uint16_t seq3 = mb_slave.registers[0x03];
-          if ((seq3 & 0x01) && !(seq3_prev & 0x01)) {
-            // Trigger Pick via Modbus: open gripper → down → grip → up
-            HAL_GPIO_WritePin(GRIPPER_GPIO_Port,     GRIPPER_Pin,     GPIO_PIN_RESET); // open first
-            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  // down
-            mb_slave.registers[0x27] |= 0x02; // task = Pick
+          // 0x03: Simple pick/place actuator sequence (bit0=Pick, bit1=Place)
+          // pick:  open → down → wait reed_down → close → wait reed_grip → up
+          // place: down → wait reed_down → open → wait !reed_grip → up
+          {
+            static uint16_t seq3_prev = 0;
+            uint16_t seq3 = mb_slave.registers[0x03];
+            // Edge-trigger: start new sequence only when idle
+            if (act_seq_state == ACT_IDLE) {
+              if ((seq3 & 0x01) && !(seq3_prev & 0x01)) {
+                // Pick: open gripper if not already open, then lower
+                if (HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin) != GPIO_PIN_RESET)
+                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+                HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); // down
+                act_seq_state = ACT_PK_DOWN;
+                act_seq_timer = 0;
+              } else if ((seq3 & 0x02) && !(seq3_prev & 0x02)) {
+                // Place: lower first
+                HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); // down
+                act_seq_state = ACT_PL_DOWN;
+                act_seq_timer = 0;
+              }
+            }
+            seq3_prev = seq3;
+
+            // Run actuator state machine (100Hz ticks)
+            // seq_delay_s controls dwell time per step — same variable as STATE_SEQUENCE
+            act_seq_timeout = (uint32_t)(seq_delay_s * 100.0f);
+            if (act_seq_timeout < 1) act_seq_timeout = 1;
+
+            switch (act_seq_state) {
+              case ACT_IDLE: break;
+
+              // Timer-first: wait seq_delay_s, then confirm with reed (or force if 3x timeout)
+              case ACT_PK_DOWN:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (reed_down || act_seq_timer >= act_seq_timeout * 3) {
+                    HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_SET); // close
+                    act_seq_state = ACT_PK_GRIP;
+                    act_seq_timer = 0;
+                  }
+                }
+                break;
+
+              case ACT_PK_GRIP:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (reed_grip || act_seq_timer >= act_seq_timeout * 3) {
+                    HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); // up
+                    act_seq_state = ACT_PK_UP;
+                    act_seq_timer = 0;
+                  }
+                }
+                break;
+
+              case ACT_PK_UP:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (reed_up || act_seq_timer >= act_seq_timeout * 3) {
+                    mb_slave.registers[0x27] |= 0x02; // pick done
+                    act_seq_state = ACT_IDLE;
+                  }
+                }
+                break;
+
+              case ACT_PL_DOWN:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (reed_down || act_seq_timer >= act_seq_timeout * 3) {
+                    HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); // open
+                    act_seq_state = ACT_PL_OPEN;
+                    act_seq_timer = 0;
+                  }
+                }
+                break;
+
+              case ACT_PL_OPEN:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (!reed_grip || act_seq_timer >= act_seq_timeout * 3) {
+                    HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_RESET); // up
+                    act_seq_state = ACT_PL_UP;
+                    act_seq_timer = 0;
+                  }
+                }
+                break;
+
+              case ACT_PL_UP:
+                act_seq_timer++;
+                if (act_seq_timer >= act_seq_timeout) {
+                  if (reed_up || act_seq_timer >= act_seq_timeout * 3) {
+                    mb_slave.registers[0x27] |= 0x04; // place done
+                    act_seq_state = ACT_IDLE;
+                  }
+                }
+                break;
+
+              default: act_seq_state = ACT_IDLE; break;
+            }
           }
-          if ((seq3 & 0x02) && !(seq3_prev & 0x02)) {
-            // Trigger Place via Modbus: down → release → up
-            HAL_GPIO_WritePin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin, GPIO_PIN_SET);  // down
-            mb_slave.registers[0x27] |= 0x04; // task = Place
-          }
-          seq3_prev = seq3;
         }
         
         // Apply Motor Command — PID states handle their own PWM in TIM7 ISR
@@ -1534,7 +1738,7 @@ int main(void)
             safe_speed = -safe_speed;
           }
           if (safe_speed > 1.0f) safe_speed = 1.0f;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)(safe_speed * (float)htim3.Init.Period));
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint32_t)(safe_speed * (float)htim3.Init.Period));
         }
 
       } // End Normal Production Mode
@@ -1643,10 +1847,14 @@ int main(void)
             dev_dash.IO.in_reset      = HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port, RESET_BTN_Pin);
             dev_dash.IO.in_power      = HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port, POWER_BTN_Pin);
 
-            dev_dash.IO.out_pwm       = (safe_speed > 0.0f || safe_speed < 0.0f) ? 1 : 0;
-            dev_dash.IO.out_dir       = HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin);
-            dev_dash.IO.out_pneumatic = HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin);
-            dev_dash.IO.out_gripper   = HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin);
+            dev_dash.IO.out_pwm         = (safe_speed > 0.0f || safe_speed < 0.0f) ? 1 : 0;
+            dev_dash.IO.out_dir         = HAL_GPIO_ReadPin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin);
+            dev_dash.IO.out_power_latch = HAL_GPIO_ReadPin(POWER_LATCH_GPIO_Port, POWER_LATCH_Pin);
+            dev_dash.IO.out_pneumatic   = HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin);
+            dev_dash.IO.out_gripper     = HAL_GPIO_ReadPin(GRIPPER_GPIO_Port, GRIPPER_Pin);
+            dev_dash.IO.reed_up         = reed_up;
+            dev_dash.IO.reed_down       = reed_down;
+            dev_dash.IO.reed_grip       = reed_grip;
             dev_dash.IO.out_tower_g   = HAL_GPIO_ReadPin(TOWER_G_GPIO_Port, TOWER_G_Pin);
             dev_dash.IO.out_tower_y   = HAL_GPIO_ReadPin(TOWER_Y_GPIO_Port, TOWER_Y_Pin);
             dev_dash.IO.out_tower_r   = HAL_GPIO_ReadPin(TOWER_R_GPIO_Port, TOWER_R_Pin);
@@ -1747,12 +1955,12 @@ static void MX_ADC2_Init(void)
   hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc2.Init.LowPowerAutoWait = DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.ContinuousConvMode = ENABLE;
   hadc2.Init.NbrOfConversion = 1;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
   hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.DMAContinuousRequests = ENABLE;
   hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   hadc2.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc2) != HAL_OK)
@@ -1762,9 +1970,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_2;  // PA1 = ADC2_IN2
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -2053,7 +2261,7 @@ static void MX_TIM3_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -2120,8 +2328,11 @@ static void MX_DMA_Init(void)
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
   /* DMA1_Channel3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 3, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
 }
 
@@ -2142,41 +2353,42 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, POWER_LATCH_Pin|PNEUMATIC_Pin|TOWER_G_Pin|TOWER_R_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, MOTOR_DIR_Pin|LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, PNEUMATIC_Pin|GRIPPER_Pin|POWER_LATCH_Pin|TOWER_R_Pin
+                          |TOWER_Y_Pin|TOWER_G_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GRIPPER_Pin|EMER_OUTPUT_Pin|RESET_LED_Pin|TOWER_Y_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(MOTOR_DIR_GPIO_Port, MOTOR_DIR_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : RESET_BTN_Pin HOME_SENSOR_Pin */
-  GPIO_InitStruct.Pin = RESET_BTN_Pin|HOME_SENSOR_Pin;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : RESET_BTN_Pin MODE_Pin HOME_SENSOR_Pin */
+  GPIO_InitStruct.Pin = RESET_BTN_Pin|MODE_Pin|HOME_SENSOR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : POWER_LATCH_Pin PNEUMATIC_Pin TOWER_G_Pin TOWER_R_Pin */
-  GPIO_InitStruct.Pin = POWER_LATCH_Pin|PNEUMATIC_Pin|TOWER_G_Pin|TOWER_R_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : MOTOR_DIR_Pin LD2_Pin */
-  GPIO_InitStruct.Pin = MOTOR_DIR_Pin|LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : REED_UP_Pin REED_DOWN_Pin */
-  GPIO_InitStruct.Pin = REED_UP_Pin|REED_DOWN_Pin;
+  /*Configure GPIO pins : REED_DOWN_Pin REED_UP_Pin */
+  GPIO_InitStruct.Pin = REED_DOWN_Pin|REED_UP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : REED_GRIP_Pin */
   GPIO_InitStruct.Pin = REED_GRIP_Pin;
@@ -2184,31 +2396,43 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(REED_GRIP_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : POWER_BTN_Pin ESTOP_Pin */
-  GPIO_InitStruct.Pin = POWER_BTN_Pin|ESTOP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : GRIPPER_Pin EMER_OUTPUT_Pin RESET_LED_Pin TOWER_Y_Pin */
-  GPIO_InitStruct.Pin = GRIPPER_Pin|EMER_OUTPUT_Pin|RESET_LED_Pin|TOWER_Y_Pin;
+  /*Configure GPIO pins : PNEUMATIC_Pin GRIPPER_Pin POWER_LATCH_Pin TOWER_R_Pin
+                           TOWER_Y_Pin TOWER_G_Pin */
+  GPIO_InitStruct.Pin = PNEUMATIC_Pin|GRIPPER_Pin|POWER_LATCH_Pin|TOWER_R_Pin
+                          |TOWER_Y_Pin|TOWER_G_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : MODE_Pin */
-  GPIO_InitStruct.Pin = MODE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(MODE_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pins : MOTOR_DIR_Pin EMER_OUTPUT_Pin */
+  GPIO_InitStruct.Pin = MOTOR_DIR_Pin|EMER_OUTPUT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+  /*Configure GPIO pin : ESTOP_Pin */
+  GPIO_InitStruct.Pin = ESTOP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(ESTOP_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : RESET_LED_Pin */
+  GPIO_InitStruct.Pin = RESET_LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(RESET_LED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : POWER_BTN_Pin */
+  GPIO_InitStruct.Pin = POWER_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(POWER_BTN_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* (EXTI2 removed — ESTOP moved from PC2 → PB13, now polled in 100Hz loop) */
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -2373,7 +2597,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         Velocity_PID_Reset();
         Position_PID_Reset();
         hard_stop_active = 0;
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
         motor_speed_cmd = 0.0f;
       } else {
         // ── Outer: Position PID → velocity setpoint ──────────────────────────
@@ -2426,7 +2650,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         } else {
           pwm_cnt = 0;
         }
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_cnt);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, pwm_cnt);
         motor_speed_cmd = pwm_pct / 100.0f;
       }
 
@@ -2451,7 +2675,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         isr_was_auto = 1;
       } else if (isr_was_auto) {
         isr_was_auto = 0;
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // force PWM=0
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0); // force PWM=0
       }
     }
 

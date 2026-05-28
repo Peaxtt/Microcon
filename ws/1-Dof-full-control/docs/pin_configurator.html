@@ -2,728 +2,1417 @@
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>1-DOF Pin Configurator</title>
+<title>1-DOF Control Panel</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #12141a; color: #ddd; font-family: 'Segoe UI', sans-serif; font-size: 13px; }
 
 /* ── Top bar ── */
 .topbar {
-  background: #1a1d26; border-bottom: 1px solid #2a2d3a;
-  padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: #1a1d26; border-bottom: 2px solid #2a2d3a;
+  padding: 8px 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.topbar h1 { font-size: 0.95rem; color: #aaa; letter-spacing: 1px; flex: 1; }
+.topbar h1 { font-size: 0.9rem; color: #aaa; letter-spacing: 1px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #444; flex-shrink: 0; transition: background .3s; }
+.dot.on  { background: #44cc77; box-shadow: 0 0 5px #44cc77; }
+.dot.err { background: #ff4444; }
+#mode-badge {
+  font-size: 0.7rem; padding: 2px 8px; border-radius: 10px;
+  background: #1e2030; border: 1px solid #3a3d54; color: #667;
+}
+#mode-badge.pcb { background: #0a2218; border-color: #1a6a3a; color: #44cc77; }
+#mode-badge.fw  { background: #0a1830; border-color: #1a3a7a; color: #7799ff; }
+.spacer { flex: 1; }
+.port-hint { font-size: 0.68rem; color: #445; }
+
+/* ── Buttons ── */
 .btn {
-  background: #252836; border: 1px solid #3a3d50; color: #99aacc;
-  border-radius: 4px; padding: 5px 12px; cursor: pointer; font-size: 0.75rem;
-  transition: background .15s;
+  background: #1e2235; border: 1px solid #3a4060; color: #99aacc;
+  border-radius: 5px; padding: 5px 13px; cursor: pointer; font-size: 0.73rem;
+  transition: all .15s; letter-spacing: 0.2px;
 }
-.btn:hover { background: #303448; }
-.btn.primary { background: #1e3a5f; border-color: #2a5a9a; color: #88bbff; }
-.btn.primary:hover { background: #264a72; }
-.btn.warn { background: #3a1a00; border-color: #6a3a00; color: #ffaa44; }
+.btn:hover { background: #283050; border-color: #4a5070; color: #bbccff; }
+.btn.primary { background: #1a3a6a; border-color: #3060b0; color: #99ccff; }
+.btn.primary:hover { background: #204888; border-color: #4070cc; color: #bbddff; }
+.btn.danger  { background: #3a1010; border-color: #882222; color: #ff8888; }
+.btn.danger:hover  { background: #501818; border-color: #aa3333; color: #ffaaaa; }
+.btn.warn { background: #3a2000; border-color: #885500; color: #ffbb55; }
+.btn.warn:hover { background: #4a2a00; border-color: #aa6600; color: #ffcc77; }
+.btn.success { background: #0a3020; border-color: #207a40; color: #55dd88; }
+.btn.success:hover { background: #104030; border-color: #309a50; color: #77ffaa; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
-/* ── Layout ── */
-.main { display: flex; gap: 0; align-items: flex-start; padding: 12px; }
+/* ── Tabs ── */
+.tab-bar { background: #161924; border-bottom: 1px solid #252836; display: flex; }
+.tab-btn {
+  padding: 8px 22px; cursor: pointer; color: #556; font-size: 0.8rem;
+  border: none; border-bottom: 2px solid transparent; background: none; transition: all .15s;
+}
+.tab-btn:hover { color: #99aacc; background: #1a1d26; }
+.tab-btn.active { color: #88aaff; border-bottom-color: #4466ee; background: #1a1d26; }
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
 
-/* side columns */
-.pin-col { display: flex; flex-direction: column; gap: 3px; min-width: 300px; }
-.pin-col.right { min-width: 300px; }
+/* ══════════════════════════════════════
+   TAB 1 — PIN CONFIG
+══════════════════════════════════════ */
+#tab-pins { padding: 10px 14px 20px; }
 
-/* each pin row */
-.pin-row {
-  display: flex; align-items: center; gap: 6px; padding: 2px 4px;
-  border-radius: 4px; transition: background .1s;
+/* Interface pins (top 5) */
+.iface-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
+.iface-pin {
+  flex: 1; min-width: 110px; background: #1a1d26; border: 1px solid #2a2d3a;
+  border-radius: 5px; padding: 7px 9px;
 }
-.pin-row:hover { background: #1e2030; }
+.ip-name { font-weight: 700; font-size: 0.8rem; color: #88aaff; }
+.ip-pin  { font-size: 0.65rem; color: #445; }
+.ip-note { font-size: 0.62rem; color: #445; margin-top: 1px; }
+.ip-live {
+  margin-top: 4px; font-size: 0.68rem; padding: 2px 6px; border-radius: 8px;
+  background: #1e2030; border: 1px solid #2a2d3a; color: #556; display: inline-block;
+}
+.ip-live.hi { background: #0a2a14; border-color: #1a6030; color: #44cc77; }
+.ip-live.lo { background: #2a0a0a; border-color: #601818; color: #cc4444; }
 
-.pin-label {
-  font-weight: 700; font-size: 0.75rem; width: 72px;
-  white-space: nowrap; color: #ccc;
-}
-.pin-col.right .pin-label { text-align: left; }
-.pin-col.left  .pin-label { text-align: right; }
-
-.pin-dot { width: 8px; height: 8px; border-radius: 50%; background: #333; flex-shrink: 0; }
-
-select.func-sel {
-  background: #1a1d26; color: #aaa; border: 1px solid #2a2d3a;
-  border-radius: 4px; padding: 3px 6px; font-size: 0.72rem; width: 100%;
-  cursor: pointer; outline: none; transition: border-color .15s;
-}
-select.func-sel:focus { border-color: #4a6aaa; }
-
-.warn-icon { font-size: 0.75rem; width: 16px; text-align: center; flex-shrink: 0; }
-
-/* PCB body */
-.pcb-body {
-  flex: 1; background: #0c1f0c; border: 2px solid #1a4a1a;
-  border-radius: 8px; margin: 0 8px; min-width: 200px; max-width: 240px;
-  display: flex; flex-direction: column; align-items: center;
-  padding: 10px 8px; gap: 6px; align-self: stretch;
-}
-.pcb-chip {
-  border: 2px dashed #2a5a2a; border-radius: 6px;
-  padding: 10px 20px; text-align: center; flex: 1;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
-}
-.pcb-chip .c1 { color: #3a8a3a; font-size: 0.7rem; }
-.pcb-chip .c2 { color: #2a6a2a; font-size: 0.85rem; font-weight: 700; }
-.pcb-chip .c3 { color: #1e4a1e; font-size: 0.62rem; }
-.rp2040-box {
-  background: #0a1a0a; border: 1px solid #1a3a1a; border-radius: 5px;
-  padding: 5px 10px; text-align: center; width: 100%;
-}
-.rp2040-box .r1 { color: #3a7a3a; font-size: 0.62rem; }
-.rp2040-box .r2 { color: #4a9a4a; font-size: 0.72rem; font-weight: 600; }
-.can-box {
-  background: #0a100a; border: 1px solid #1a3a2a; border-radius: 5px;
-  padding: 5px 10px; text-align: center; width: 100%;
-  color: #3a7a5a; font-size: 0.62rem;
-}
-.power-rail {
-  display: flex; gap: 3px; flex-wrap: wrap; justify-content: center; width: 100%;
-}
-.pwr-badge {
-  font-size: 0.58rem; font-weight: 700; padding: 2px 5px; border-radius: 3px;
-}
-
-/* ── Right panel ── */
-.right-panel {
-  width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
-  padding-left: 8px;
-}
-.panel-box {
+/* Top connector strip */
+.top-connector {
+  display: flex; align-items: stretch; gap: 0; margin-bottom: 10px;
   background: #1a1d26; border: 1px solid #2a2d3a; border-radius: 6px; overflow: hidden;
 }
-.panel-box h3 {
-  background: #252836; padding: 7px 12px; font-size: 0.78rem; color: #99aacc;
-  border-bottom: 1px solid #2a2d3a;
+.tc-label {
+  background: #12141a; padding: 6px 8px; font-size: 0.6rem; color: #445;
+  writing-mode: vertical-rl; letter-spacing: 1px; border-right: 1px solid #252836;
+  display: flex; align-items: center; justify-content: center;
 }
-.summary-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
-.summary-table td { padding: 3px 10px; border-bottom: 1px solid #1e2030; }
-.summary-table tr:last-child td { border-bottom: none; }
-.summary-table .s-pin { color: #888; font-weight: 600; width: 80px; }
-.summary-table .s-func { color: #ccc; }
-.summary-table .s-new { color: #ffd700; }
-.summary-table .s-empty { color: #444; }
-
-.diff-box { padding: 10px 12px; font-size: 0.7rem; }
-.diff-row { margin: 3px 0; display: flex; align-items: flex-start; gap: 6px; }
-.diff-row .d-icon { flex-shrink: 0; }
-.diff-row.diff-old { color: #ff8888; }
-.diff-row.diff-new { color: #88ff88; }
-.diff-row.diff-ok  { color: #55aa55; }
-.diff-row.diff-warn { color: #ffaa44; }
-
-.conflict-box { padding: 8px 12px; font-size: 0.7rem; }
-.conflict-item { color: #ff9944; margin: 2px 0; }
-
-/* ── Legend / color strips ── */
-.color-strip { height: 3px; width: 100%; }
-
-/* category colors */
-.cat-motor    { color: #7ab3ff; }
-.cat-safety   { color: #ff8888; }
-.cat-actuator { color: #ffaa44; }
-.cat-tower    { color: #cc99ff; }
-.cat-comm     { color: #55ddcc; }
-.cat-reed     { color: #55cc88; }
-.cat-can      { color: #66dd66; }
-.cat-sensor   { color: #ff6699; }
-.cat-system   { color: #ffee66; }
-.cat-unused   { color: #444; }
-
-/* ── PCB health badges ── */
-.health-badge {
-  font-size: 0.6rem; font-weight: 700; padding: 1px 4px;
-  border-radius: 3px; flex-shrink: 0; white-space: nowrap; cursor: default;
+.tc-pins { display: flex; flex: 1; }
+.tc-pin {
+  flex: 1; padding: 5px 6px; border-right: 1px solid #252836;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 58px;
 }
-.health-ok   { background:#0a2a0a; color:#33aa33; border:1px solid #1a5a1a; }
-.health-warn { background:#2a1a00; color:#ffaa33; border:1px solid #5a3a00; }
-.health-bad  { background:#2a0a0a; color:#ff4444; border:1px solid #6a1a1a; }
+.tc-pin:last-child { border-right: none; }
+.tc-dot  { width: 7px; height: 7px; border-radius: 50%; }
+.tc-pname { font-size: 0.7rem; font-weight: 700; color: #bbb; }
+.tc-func  { font-size: 0.6rem; color: #556; }
+.tc-badge {
+  font-size: 0.6rem; padding: 1px 5px; border-radius: 6px;
+  background: #1e2030; border: 1px solid #2a2d3a; color: #445; min-width: 26px; text-align: center;
+}
+.tc-badge.hi { background: #0a2a14; border-color: #1a6030; color: #44cc77; }
+.tc-badge.lo { background: #2a0a0a; border-color: #601818; color: #cc4444; }
+
+/* 3-column PCB layout */
+.pcb-layout { display: grid; grid-template-columns: 210px 1fr 195px; gap: 10px; align-items: start; }
+
+.pin-col { display: flex; flex-direction: column; gap: 1px; }
+.col-hdr { font-size: 0.6rem; color: #445; text-transform: uppercase; letter-spacing: 1px; padding: 2px 4px; margin-bottom: 2px; }
+.pin-col.left  .col-hdr { text-align: right; }
+.pin-col.right .col-hdr { text-align: left;  }
+
+.pin-row {
+  display: flex; align-items: center; gap: 5px; padding: 3px 5px;
+  border-radius: 3px; transition: background .1s;
+}
+.pin-row:hover { background: #1e2030; }
+.pin-col.left  .pin-row { justify-content: flex-end; }
+.pin-col.right .pin-row { justify-content: flex-start; }
+
+.pr-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.pr-label { font-size: 0.7rem; font-weight: 700; color: #ccc; width: 40px; flex-shrink: 0; }
+.pin-col.left  .pr-label { text-align: right; }
+.pin-col.right .pr-label { text-align: left;  }
+.pr-func  { font-size: 0.72rem; color: #99aacc; flex: 1; }
+.pin-col.left .pr-func { text-align: right; }
+
+.pr-dir {
+  font-size: 0.58rem; padding: 1px 4px; border-radius: 5px; border: 1px solid #333; white-space: nowrap; flex-shrink: 0;
+}
+.pr-dir.out  { color: #ffaa44; border-color: #5a3a00; background: #261500; }
+.pr-dir.in   { color: #55cc88; border-color: #1a5530; background: #0a2214; }
+.pr-dir.adc  { color: #ff6699; border-color: #5a1a30; background: #200a12; }
+.pr-dir.enc  { color: #88aaff; border-color: #1a3060; background: #0a1428; }
+
+.pr-live {
+  font-size: 0.6rem; padding: 1px 5px; border-radius: 6px;
+  background: #1e2030; border: 1px solid #2a2d3a; color: #445;
+  min-width: 26px; text-align: center; flex-shrink: 0;
+}
+.pr-live.hi { background: #0a2a14; border-color: #1a6030; color: #44cc77; }
+.pr-live.lo { background: #2a0a0a; border-color: #601818; color: #cc4444; }
+
+/* PCB center graphic */
+.pcb-body {
+  background: #161924; border: 2px solid #2e3148; border-radius: 8px; padding: 10px; min-height: 260px;
+}
+.pcb-body h3 { text-align: center; font-size: 0.68rem; color: #445; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.chip { background: #0d0f18; border: 2px solid #3a3d60; border-radius: 5px; padding: 8px; text-align: center; margin-bottom: 6px; }
+.chip-name { font-size: 0.85rem; font-weight: 700; color: #8899ff; }
+.chip-sub  { font-size: 0.62rem; color: #445; margin-top: 2px; }
+.sub-block {
+  background: #1a1d26; border: 1px solid #252836; border-radius: 4px;
+  padding: 5px 7px; margin-bottom: 5px; text-align: center; font-size: 0.66rem; color: #556;
+}
+.sub-block strong { color: #88aacc; font-size: 0.7rem; }
+.sub-row { display: flex; gap: 5px; }
+.sub-row .sub-block { flex: 1; }
+
+/* ══════════════════════════════════════
+   TAB 2 — PCB TEST
+══════════════════════════════════════ */
+#tab-test { padding: 10px 14px; }
+.cards { display: flex; flex-wrap: wrap; gap: 10px; }
+.card { background: #181b28; border: 1px solid #2e3350; border-radius: 8px; padding: 10px 13px; min-width: 200px; }
+.card h3 { font-size: 0.72rem; color: #7788aa; margin-bottom: 8px; border-bottom: 1px solid #252a3e; padding-bottom: 5px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }
+.card.wide { min-width: 380px; }
+.card.full { width: 100%; }
+
+.out-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.out-item { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.out-item label { font-size: 0.6rem; color: #88aaff; text-align: center; line-height: 1.2; }
+.sw { position: relative; width: 32px; height: 17px; cursor: pointer; }
+.sw input { opacity: 0; width: 0; height: 0; }
+.sw-track { position: absolute; inset: 0; background: #1e2030; border: 1px solid #333; border-radius: 9px; transition: background .2s; }
+.sw input:checked + .sw-track { background: #1a5a30; border-color: #2a9a50; }
+.sw-thumb { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; background: #556; border-radius: 50%; transition: transform .2s, background .2s; }
+.sw input:checked ~ .sw-thumb { transform: translateX(15px); background: #44cc77; }
+
+.in-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+.in-item { display: flex; align-items: center; gap: 5px; padding: 3px 6px; background: #12141a; border-radius: 3px; }
+.in-item label { font-size: 0.66rem; color: #aaa; flex: 1; }
+.in-badge { font-size: 0.62rem; padding: 1px 5px; border-radius: 6px; background: #1e2030; border: 1px solid #2a2d3a; color: #445; }
+.in-badge.hi { background: #0a2a14; border-color: #1a6030; color: #44cc77; }
+.in-badge.lo { background: #1a1a1a; border-color: #2a2a2a; color: #445; }
+
+.motor-row { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.motor-row label { font-size: 0.7rem; color: #99aacc; width: 36px; }
+input[type=range] { flex: 1; accent-color: #4466ee; }
+#pwm-disp { font-size: 0.78rem; font-weight: 700; color: #88bbff; width: 34px; text-align: right; }
+.btn-row { display: flex; gap: 5px; margin-bottom: 4px; }
+.btn-row .btn { flex: 1; text-align: center; }
+
+.joy-layout { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.joy-stick-wrap { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.joy-lbl { font-size: 0.62rem; color: #556; }
+canvas { border: 1px solid #252836; border-radius: 3px; background: #0d0f14; }
+.joy-vals { font-size: 0.65rem; color: #556; }
+.trig-wrap { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; }
+.trig-row { display: flex; align-items: center; gap: 5px; }
+.trig-row > span { font-size: 0.65rem; color: #667; width: 18px; }
+.tbar { height: 5px; width: 90px; background: #1e2030; border-radius: 3px; overflow: hidden; border: 1px solid #2a2d3a; }
+.tbar-fill { height: 100%; background: #4466ee; width: 0%; }
+.tval { font-size: 0.62rem; color: #556; width: 20px; }
+.joy-btns-grid { display: grid; grid-template-columns: repeat(8, 26px); gap: 2px; margin-top: 5px; }
+.jbtn { height: 18px; border-radius: 3px; background: #1e2030; border: 1px solid #2a2d3a; font-size: 0.58rem; color: #556; display: flex; align-items: center; justify-content: center; }
+.jbtn.on { background: #1a3060; border-color: #2a50a0; color: #88aaff; }
+
+.macro-list { min-height: 32px; margin-bottom: 5px; }
+.mc-item { display: flex; align-items: center; gap: 4px; padding: 2px 4px; background: #12141a; border: 1px solid #1e2030; border-radius: 3px; margin-bottom: 2px; cursor: grab; }
+.mc-item.dragging { opacity: 0.4; }
+.mc-handle { color: #334; user-select: none; padding: 0 2px; font-size: 0.7rem; }
+.mc-cmd { flex: 1; font-family: monospace; font-size: 0.7rem; color: #7799ff; }
+.mc-del { color: #445; cursor: pointer; font-size: 0.75rem; padding: 0 3px; }
+.mc-del:hover { color: #ff6644; }
+.mc-add { display: flex; gap: 4px; }
+.mc-add input { flex: 1; background: #0d0f14; border: 1px solid #252836; color: #ccc; border-radius: 3px; padding: 3px 6px; font-size: 0.7rem; }
+.mc-presets { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.mc-presets span { font-size: 0.65rem; color: #445; align-self: center; }
+
+#lt-log {
+  background: #0d0f14; border: 1px solid #252836; border-radius: 4px;
+  height: 110px; overflow-y: auto; padding: 5px 7px;
+  font-family: monospace; font-size: 0.68rem; display: flex; flex-direction: column; gap: 1px;
+}
+.rx { color: #44cc77; } .tx { color: #5577ff; } .er { color: #ff5544; } .ii { color: #888; }
+
+/* ══════════════════════════════════════
+   TAB 3 — CONTROL
+══════════════════════════════════════ */
+#tab-ctrl { padding: 10px 14px; }
+.ctrl-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Status bar */
+.ctrl-status-bar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: #0f1220; border: 1px solid #1e2440; border-radius: 6px;
+  padding: 8px 14px; margin-bottom: 8px;
+}
+.ctrl-pos-big { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
+.ctrl-pos-big .val { font-size: 2.1rem; font-weight: 700; color: #88aaff; line-height: 1; font-variant-numeric: tabular-nums; }
+.ctrl-pos-big .lbl { font-size: 0.6rem; color: #445; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+.ctrl-stats { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }
+.stat-item { background: #12141a; border: 1px solid #252836; border-radius: 5px; padding: 5px 10px; min-width: 80px; }
+.stat-item .sl { font-size: 0.6rem; color: #445566; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-item .sv { font-size: 0.88rem; font-weight: 700; color: #88aaff; line-height: 1.3; }
+.estop-badge { padding: 4px 12px; border-radius: 5px; font-size: 0.78rem; font-weight: 700; border: 1px solid #252836; background: #12141a; color: #445; flex-shrink: 0; }
+.estop-badge.ok  { background: #082012; border-color: #145028; color: #44dd88; }
+.estop-badge.act { background: #200808; border-color: #501414; color: #ff5544; }
+.io-badge { padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; border: 1px solid #252836; background: #12141a; color: #445; }
+.io-badge.hi { background: #082012; border-color: #145028; color: #44dd88; }
+.io-badge.lo { background: #0a0d14; border-color: #1e2030; color: #3a4060; }
+
+/* Commands */
+.cmd-section { margin-bottom: 7px; }
+.cmd-section-label { font-size: 0.6rem; color: #3a4060; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.cmd-row { display: flex; gap: 5px; flex-wrap: wrap; }
+.cmd-row .btn { flex: 1; min-width: 90px; text-align: center; }
+.go-row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.go-row input[type=number] { flex: 1; min-width: 60px; background: #12141a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 4px; padding: 4px 8px; font-size: 0.82rem; }
+.go-row .btn { white-space: nowrap; }
+.go-unit { font-size: 0.68rem; color: #445; }
+
+/* PID / Traj */
+.gain-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.gain-row label { font-size: 0.7rem; color: #99aacc; width: 52px; }
+.gain-row input[type=number] { width: 72px; background: #12141a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 4px; padding: 3px 6px; font-size: 0.75rem; }
+.gain-sub { font-size: 0.6rem; color: #3a4060; text-transform: uppercase; letter-spacing: 0.8px; margin: 6px 0 3px; }
+.traj-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.traj-row label { font-size: 0.7rem; color: #99aacc; width: 60px; }
+.traj-row select { background: #12141a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 4px; padding: 3px 6px; font-size: 0.73rem; }
+.traj-row input[type=number] { width: 72px; background: #12141a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 4px; padding: 3px 6px; font-size: 0.75rem; }
+.traj-row .gunit { font-size: 0.62rem; color: #445; }
+
+/* ══════════════════════════════════════
+   TAB 4 — DEPLOY
+══════════════════════════════════════ */
+#tab-deploy { padding: 10px 14px; }
+.deploy-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.deploy-grid .card { flex: 1; min-width: 270px; }
+
+.raw-row { display: flex; gap: 5px; align-items: center; margin-bottom: 5px; }
+.raw-row label { font-size: 0.7rem; color: #aaa; width: 68px; }
+.raw-row input[type=number] { width: 78px; background: #12141a; border: 1px solid #2a2d3a; color: #ccc; border-radius: 4px; padding: 3px 6px; }
+#raw-resp { background: #0d0f14; border: 1px solid #2a2d3a; border-radius: 4px; min-height: 38px; padding: 5px 8px; font-family: monospace; font-size: 0.7rem; color: #88aaff; margin-top: 5px; word-break: break-all; }
+
+.release-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #252836; }
+.release-msg { background: #0a2a14; border: 1px solid #1a6030; border-radius: 4px; padding: 8px 12px; font-size: 0.75rem; color: #44cc77; display: none; margin-top: 8px; }
 </style>
 </head>
 <body>
 
+<!-- ══ TOP BAR ══════════════════════════════════ -->
 <div class="topbar">
-  <h1>1-DOF Pin Configurator — STM32G474RETx</h1>
-  <button class="btn primary" onclick="loadFirmwareDefaults()">โหลด firmware ปัจจุบัน</button>
-  <button class="btn primary" onclick="loadNewPCBDefaults()">โหลด PCB ใหม่ (แก้แล้ว)</button>
-  <button class="btn" onclick="clearAll()">ล้างทั้งหมด</button>
-  <button class="btn" onclick="importFromFile()">📂 Import TXT</button>
-  <button class="btn warn" onclick="exportSummary()">Export Summary</button>
+  <h1>1-DOF · STM32G474RETx</h1>
+  <div class="dot" id="dot"></div>
+  <span id="conn-lbl" style="font-size:0.73rem;color:#556">Disconnected</span>
+  <span id="mode-badge">—</span>
+  <span class="port-hint">LPUART1 · 19200 8E1</span>
+  <span class="spacer"></span>
+  <button class="btn primary" id="btn-con"  onclick="ltConnect()">Connect</button>
+  <button class="btn danger"  id="btn-dis"  onclick="ltDisconnect()" style="display:none">Disconnect</button>
 </div>
 
-<div class="main">
+<!-- ══ TABS ═════════════════════════════════════ -->
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="showTab('pins',this)">📌 Pin Config</button>
+  <button class="tab-btn"        onclick="showTab('test',this)">🔌 PCB Test</button>
+  <button class="tab-btn"        onclick="showTab('ctrl',this)">🎛 Control</button>
+  <button class="tab-btn"        onclick="showTab('deploy',this)">🚀 Deploy</button>
+</div>
 
-  <!-- LEFT PINS -->
-  <div class="pin-col left" id="col-left"></div>
+<!-- ══════════════════════════════════════════════
+     TAB 1 — PIN CONFIG  (layout ตาม PCB จริง)
+══════════════════════════════════════════════ -->
+<div id="tab-pins" class="tab-pane active">
+  <div style="padding:10px 14px 20px">
 
-  <!-- PCB BODY -->
-  <div class="pcb-body">
-    <div class="power-rail">
-      <span class="pwr-badge" style="background:#3a0808;color:#ff6666">GND</span>
-      <span class="pwr-badge" style="background:#080838;color:#6688ff">5V</span>
-      <span class="pwr-badge" style="background:#3a0808;color:#ff6666">GND</span>
-      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
-      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
-      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
-      <span class="pwr-badge" style="background:#3a2200;color:#ffaa44">3V3</span>
+    <!-- Interface pins (5 ตัวหลัก) -->
+    <div style="font-size:0.6rem;color:#445;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px">Interface / Control</div>
+    <div class="iface-row" id="iface-row"></div>
+
+    <!-- Top connector J1 -->
+    <div class="top-connector">
+      <div class="tc-label">J1 TOP</div>
+      <div class="tc-pins" id="tc-pins"></div>
     </div>
 
-    <div class="rp2040-box">
-      <div class="r1">USB-C Joystick Bridge</div>
-      <div class="r2">RP2040-Zero</div>
-    </div>
+    <!-- 3-column board layout -->
+    <div class="pcb-layout">
 
-    <div class="pcb-chip">
-      <div class="c1">Custom PCB</div>
-      <div class="c2">STM32G474RETx</div>
-      <div class="c3">170 MHz · LQFP64</div>
-    </div>
-
-    <div class="can-box">
-      TJA1050 CAN Transceiver<br>
-      PA11(RX) / PA12(TX) internal<br>
-      → CANH / CANL @ 1Mbit/s
-    </div>
-
-    <div style="font-size:0.58rem;color:#1a4a1a;text-align:center;padding-top:4px">
-      Solenoid drivers: PC1 · PB11 · PC6
-    </div>
-  </div>
-
-  <!-- RIGHT PINS -->
-  <div class="pin-col right" id="col-right"></div>
-
-  <!-- RIGHT PANEL -->
-  <div class="right-panel">
-
-    <div class="panel-box">
-      <h3>⚡ Conflicts / Warnings</h3>
-      <div class="conflict-box" id="conflict-box">
-        <span style="color:#444">ยังไม่มี conflict</span>
+      <!-- LEFT: outputs -->
+      <div>
+        <div class="pin-col left">
+          <div class="col-hdr">◀ Outputs / Safety</div>
+          <div id="left-col"></div>
+        </div>
       </div>
-    </div>
 
-    <div class="panel-box">
-      <h3>📋 Current Assignment</h3>
-      <table class="summary-table" id="summary-table"></table>
-    </div>
-
-    <div class="panel-box">
-      <h3>🔄 Diff vs Firmware (NUCLEO)</h3>
-      <div class="diff-box" id="diff-box">
-        <span style="color:#444">โหลด config เพื่อดู diff</span>
+      <!-- CENTER: chip graphic -->
+      <div class="pcb-body">
+        <h3>PCB Board</h3>
+        <div class="chip">
+          <div class="chip-name">STM32G474RETx</div>
+          <div class="chip-sub">NUCLEO-G474RE · 170 MHz · 512 KB Flash</div>
+        </div>
+        <div class="sub-block">
+          <strong>RP2040-Zero</strong> · Joystick bridge<br>
+          <span>PB8(RX) / PB9(TX) · USART3 · 460800 8N1</span>
+        </div>
+        <div class="sub-block">
+          <strong>Cytron MDD3A</strong> · Motor driver<br>
+          <span>PC9 = PWM (TIM3 CH4 · 20kHz) · PC7 = DIR</span>
+        </div>
+        <div class="sub-row">
+          <div class="sub-block">
+            <strong>Modbus RTU</strong><br>
+            <span>PA2/PA3 · LPUART1<br>19200 8E1 · ID=21</span>
+          </div>
+          <div class="sub-block">
+            <strong>CAN Bus</strong><br>
+            <span>PA11/PA12 · FDCAN1<br>TJA1050</span>
+          </div>
+        </div>
+        <div class="sub-block" style="font-size:0.62rem;color:#3a4060;margin-top:4px">
+          TIM1 · Encoder 8192 cpr · PA8/PA9 | TIM7 ISR 1kHz<br>
+          ADC2 · Current · PA0 | EXTI3 · Home sensor · PC3
+        </div>
       </div>
-    </div>
 
+      <!-- RIGHT: inputs -->
+      <div>
+        <div class="pin-col right">
+          <div class="col-hdr">Inputs / Sensors ▶</div>
+          <div id="right-col"></div>
+        </div>
+      </div>
+
+    </div>
   </div>
 </div>
 
+<!-- ══════════════════════════════════════════════
+     TAB 2 — PCB TEST
+══════════════════════════════════════════════ -->
+<div id="tab-test" class="tab-pane">
+  <div style="padding:8px 12px;font-size:0.68rem;color:#445;border-bottom:1px solid #1e2030">
+    PCB interactive test mode — PING·SET·TOG·SCAN·PWM·J (ASCII protocol)
+  </div>
+  <div style="padding:10px 14px">
+    <div class="cards">
+
+      <div class="card">
+        <h3>Outputs</h3>
+        <div class="out-grid" id="out-grid"></div>
+      </div>
+
+      <div class="card">
+        <h3>Inputs
+          <button class="btn" style="font-size:0.6rem;padding:1px 6px;margin-left:6px" onclick="ltDoScan()">Refresh</button>
+          <span id="scan-age" style="font-size:0.62rem;color:#445;margin-left:5px"></span>
+        </h3>
+        <div class="in-grid" id="in-grid"></div>
+      </div>
+
+      <div class="card">
+        <h3>Sensors <span style="font-size:0.62rem;color:#445;font-weight:normal">(auto-update with SCAN)</span></h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div class="stat-item">
+            <div class="sl">Encoder count</div>
+            <div class="sv" id="sc-enc-cnt" style="color:#aaddff;font-size:0.9rem">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="sl">Encoder pos</div>
+            <div class="sv" id="sc-enc-deg" style="color:#88aaff;font-size:0.9rem">—</div>
+            <div class="sl">deg</div>
+          </div>
+          <div class="stat-item" style="grid-column:1/-1">
+            <div class="sl">Current (ADC PA0)</div>
+            <div class="sv" id="sc-adc-ma" style="color:#ffbb66;font-size:0.9rem">—</div>
+            <div class="sl">mA</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Motor</h3>
+        <div class="motor-row">
+          <label>PWM</label>
+          <input type="range" id="pwm-sl" min="0" max="100" value="0"
+                 oninput="document.getElementById('pwm-disp').textContent=this.value+'%'">
+          <span id="pwm-disp">0%</span>
+        </div>
+        <div class="btn-row">
+          <button class="btn" onclick="ltMotorFwd()">▶ FWD</button>
+          <button class="btn" onclick="ltMotorRev()">◀ REV</button>
+          <button class="btn danger" onclick="ltMotorStop()">■ STOP</button>
+        </div>
+        <div style="display:flex;gap:4px;margin-top:3px">
+          <button class="btn" onclick="ltPwmVal(10)">10%</button>
+          <button class="btn" onclick="ltPwmVal(25)">25%</button>
+          <button class="btn" onclick="ltPwmVal(50)">50%</button>
+          <button class="btn" onclick="ltPwmVal(75)">75%</button>
+        </div>
+      </div>
+
+      <div class="card wide">
+        <h3>Joystick (RP2040) <span id="joy-st" style="font-size:0.62rem;color:#445;font-weight:normal;margin-left:6px">disconnected</span></h3>
+        <div class="joy-layout">
+          <div class="joy-stick-wrap">
+            <canvas id="joy-l" width="66" height="66"></canvas>
+            <span class="joy-lbl">LX / LY</span>
+            <span class="joy-vals" id="joy-lv">0, 0</span>
+          </div>
+          <div class="joy-stick-wrap">
+            <canvas id="joy-r" width="66" height="66"></canvas>
+            <span class="joy-lbl">RX / RY</span>
+            <span class="joy-vals" id="joy-rv">0, 0</span>
+          </div>
+          <div>
+            <div class="trig-wrap">
+              <div class="trig-row"><span>LT</span><div class="tbar"><div class="tbar-fill" id="lt-f"></div></div><span class="tval" id="lt-v">0</span></div>
+              <div class="trig-row"><span>RT</span><div class="tbar"><div class="tbar-fill" id="rt-f"></div></div><span class="tval" id="rt-v">0</span></div>
+            </div>
+            <div class="joy-btns-grid" id="joy-bg"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card wide">
+        <h3>Macro
+          <button class="btn" style="font-size:0.6rem;padding:1px 6px;margin-left:6px" onclick="macroRun()">▶ Run All</button>
+          <button class="btn" style="font-size:0.6rem;padding:1px 6px" onclick="macroSave()">💾</button>
+          <button class="btn" style="font-size:0.6rem;padding:1px 6px" onclick="macroLoad()">📂</button>
+          <button class="btn" style="font-size:0.6rem;padding:1px 6px" onclick="macroClear()">✕</button>
+        </h3>
+        <div class="macro-list" id="mc-list"></div>
+        <div class="mc-add">
+          <input type="text" id="mc-inp" placeholder="e.g. SET:TOWER_R:1  or  DELAY:500"
+                 onkeydown="if(event.key==='Enter')macroAdd()">
+          <button class="btn primary" onclick="macroAdd()">+ Add</button>
+        </div>
+        <div class="mc-presets">
+          <span>Presets:</span>
+          <button class="btn" style="font-size:0.6rem" onclick="macroPreset('io')">I/O</button>
+          <button class="btn" style="font-size:0.6rem" onclick="macroPreset('motor')">Motor</button>
+          <button class="btn" style="font-size:0.6rem" onclick="macroPreset('tower')">Tower</button>
+        </div>
+      </div>
+
+      <div class="card full">
+        <h3>Log <button class="btn" style="font-size:0.6rem;padding:1px 6px;margin-left:6px" onclick="document.getElementById('lt-log').innerHTML=''">Clear</button></h3>
+        <div id="lt-log"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     TAB 3 — CONTROL
+══════════════════════════════════════════════ -->
+<div id="tab-ctrl" class="tab-pane">
+  <div style="padding:8px 12px;font-size:0.68rem;color:#445;border-bottom:1px solid #1e2030">
+    Modbus RTU — Main FW mode · Slave ID 21 · LPUART1 19200 8E1
+  </div>
+  <div style="padding:10px 14px">
+
+    <!-- ── STATUS BAR ── -->
+    <div class="ctrl-status-bar">
+      <canvas id="arm-gauge" width="120" height="120" style="flex-shrink:0;border-radius:50%"></canvas>
+      <div class="ctrl-pos-big">
+        <div class="val" id="st-pos">—</div>
+        <div class="lbl">degrees</div>
+      </div>
+      <div class="ctrl-stats">
+        <div class="stat-item">
+          <div class="sl">State</div>
+          <div class="sv" id="st-sys" style="color:#88ddff">—</div>
+        </div>
+        <div class="stat-item">
+          <div class="sl">Velocity</div>
+          <div class="sv" id="st-vel" style="color:#66ddff">—</div>
+          <div class="sl">deg/s</div>
+        </div>
+        <div class="stat-item">
+          <div class="sl">Accel</div>
+          <div class="sv" id="st-acc" style="color:#aaddff">—</div>
+          <div class="sl">deg/s²</div>
+        </div>
+        <div class="stat-item">
+          <div class="sl">Current</div>
+          <div class="sv" id="st-cur" style="color:#ffbb66">—</div>
+          <div class="sl">mA</div>
+        </div>
+        <div class="stat-item">
+          <div class="sl">Reed</div>
+          <div class="sv" id="st-reed" style="color:#88ffbb">—</div>
+        </div>
+      </div>
+      <div class="estop-badge" id="estop-badge">E-STOP —</div>
+    </div>
+    <!-- IO status badges -->
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px">
+      <div class="io-badge" id="iob-home">HOME —</div>
+      <div class="io-badge" id="iob-pwr">PWR_BTN —</div>
+      <div class="io-badge" id="iob-rst">RST_BTN —</div>
+      <div class="io-badge" id="iob-mode">MODE —</div>
+    </div>
+
+    <!-- ── CARDS ── -->
+    <div class="ctrl-grid">
+
+      <!-- Commands -->
+      <div class="card" style="min-width:220px;max-width:280px">
+        <h3>Commands</h3>
+
+        <!-- Homing -->
+        <div class="cmd-section">
+          <div class="cmd-section-label">Homing</div>
+          <div class="cmd-row">
+            <button class="btn primary" onclick="mbCmd('home')">🏠 Home</button>
+            <button class="btn" onclick="mbCmd('sethome')">📍 Set Home Here</button>
+          </div>
+        </div>
+
+        <!-- Auto Move -->
+        <div class="cmd-section">
+          <div class="cmd-section-label">Auto Move  <span style="color:#3a4060;font-weight:normal">(requires homed)</span></div>
+          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+            <button class="btn" onclick="mbCmd('auto')" style="font-size:0.68rem">⚙ AUTO</button>
+            <input type="number" id="go-pos" value="90" step="5" style="flex:1;min-width:55px;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:4px 6px;font-size:0.82rem">
+            <span class="go-unit">°</span>
+            <button class="btn primary" onclick="mbCmd('goto')">Go →</button>
+          </div>
+          <button class="btn warn" style="width:100%;margin-top:4px" onclick="mbCmd('abort')">⏹ Abort</button>
+        </div>
+
+        <!-- Manual Jog -->
+        <div class="cmd-section">
+          <div class="cmd-section-label">Manual Jog  <span style="color:#3a4060;font-weight:normal">(incremental)</span></div>
+          <div style="display:flex;gap:4px;margin-bottom:4px">
+            <button class="btn" onclick="mbCmd('manual')" style="font-size:0.68rem">🕹 MANUAL</button>
+            <button class="btn" onclick="mbCmd('idle')"   style="font-size:0.68rem;flex:1">Exit →IDLE</button>
+          </div>
+          <div style="display:flex;gap:3px;flex-wrap:wrap">
+            <button class="btn" style="flex:1;min-width:38px" onclick="mbJog(-30)">−30°</button>
+            <button class="btn" style="flex:1;min-width:38px" onclick="mbJog(-5)">−5°</button>
+            <button class="btn" style="flex:1;min-width:38px" onclick="mbJog(5)">+5°</button>
+            <button class="btn" style="flex:1;min-width:38px" onclick="mbJog(30)">+30°</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-top:4px;align-items:center">
+            <input type="number" id="jog-val" value="10" step="1" style="flex:1;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 6px;font-size:0.78rem">
+            <span class="go-unit">°</span>
+            <button class="btn" onclick="mbJog( parseInt(document.getElementById('jog-val').value))">Jog +</button>
+            <button class="btn" onclick="mbJog(-parseInt(document.getElementById('jog-val').value))">Jog −</button>
+          </div>
+        </div>
+
+        <!-- Actuators -->
+        <div class="cmd-section">
+          <div class="cmd-section-label">Actuators</div>
+          <div style="display:flex;gap:5px;align-items:center;margin-bottom:4px">
+            <span style="font-size:0.68rem;color:#88aacc;width:72px">Pneumatic</span>
+            <button class="btn" style="flex:1" onclick="mbActuator('pneu_down')">▼ Down</button>
+            <button class="btn" style="flex:1" onclick="mbActuator('pneu_up')">▲ Up</button>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center">
+            <span style="font-size:0.68rem;color:#88aacc;width:72px">Gripper</span>
+            <button class="btn" style="flex:1" onclick="mbActuator('grip_close')">✊ Close</button>
+            <button class="btn" style="flex:1" onclick="mbActuator('grip_open')">🖐 Open</button>
+          </div>
+        </div>
+
+        <!-- Test Mode -->
+        <div class="cmd-section">
+          <div class="cmd-section-label">Test Mode  <span style="color:#3a4060;font-weight:normal">(back-and-forth)</span></div>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+            <span style="font-size:0.65rem;color:#556;width:34px">Start</span>
+            <input type="number" id="test-start" value="0"  step="5" style="flex:1;min-width:45px;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 5px;font-size:0.75rem">
+            <span style="font-size:0.65rem;color:#556;width:24px">End</span>
+            <input type="number" id="test-end"   value="90" step="5" style="flex:1;min-width:45px;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 5px;font-size:0.75rem">
+            <span style="font-size:0.65rem;color:#556">×</span>
+            <input type="number" id="test-rep"   value="5"  step="1" min="0" style="width:38px;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 5px;font-size:0.75rem">
+          </div>
+          <button class="btn success" style="width:100%" onclick="mbTestRun()">▶ Run Test</button>
+        </div>
+
+        <!-- Emergency -->
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid #252836">
+          <button class="btn danger" style="width:100%;font-size:0.8rem;padding:7px"
+                  onclick="mbCmd('estop')">🛑 E-Stop SW</button>
+          <div style="font-size:0.6rem;color:#3a3030;margin-top:3px;text-align:center">
+            ดับ PWM ทันที · ยกเลิกโดยส่ง command ใหม่
+          </div>
+        </div>
+      </div>
+
+      <!-- PID Gains -->
+      <div class="card" style="min-width:195px">
+        <h3>PID Gains</h3>
+        <div class="gain-sub">Velocity loop</div>
+        <div class="gain-row"><label>kp_vel</label><input type="number" id="g-kpv" value="30"  step="1"></div>
+        <div class="gain-row"><label>ki_vel</label><input type="number" id="g-kiv" value="0.1" step="0.01"></div>
+        <div class="gain-row"><label>kd_vel</label><input type="number" id="g-kdv" value="0"   step="0.01"></div>
+        <div class="gain-sub">Position loop</div>
+        <div class="gain-row"><label>kp_pos</label><input type="number" id="g-kpp" value="1.0" step="0.1"></div>
+        <div class="gain-row"><label>kd_pos</label><input type="number" id="g-kdp" value="0"   step="0.01"></div>
+        <div class="gain-row"><label>ki_pos</label><input type="number" id="g-kip" value="0"   step="0.01"></div>
+        <button class="btn primary" style="margin-top:8px;width:100%" onclick="mbApplyPID()">Apply PID → Board</button>
+      </div>
+
+      <!-- Trajectory -->
+      <div class="card" style="min-width:195px">
+        <h3>Trajectory</h3>
+        <div class="traj-row">
+          <label>Type</label>
+          <select id="tr-type"><option value="0">Trapezoid</option><option value="1">S-Curve</option></select>
+        </div>
+        <div class="traj-row"><label>v_max</label><input type="number" id="tr-vmax" value="3.14" step="0.1"><span class="gunit">rad/s</span></div>
+        <div class="traj-row"><label>a_max</label><input type="number" id="tr-amax" value="6.28" step="0.1"><span class="gunit">rad/s²</span></div>
+        <div class="traj-row"><label>j_max</label><input type="number" id="tr-jmax" value="10"   step="1"><span class="gunit">rad/s³</span></div>
+        <button class="btn primary" style="margin-top:8px;width:100%" onclick="mbApplyTraj()">Apply Traj → Board</button>
+      </div>
+
+      <!-- System Params -->
+      <div class="card" style="min-width:195px">
+        <h3>System</h3>
+        <div class="gain-sub">Mode</div>
+        <div class="traj-row">
+          <label>Sys.mode</label>
+          <select id="sys-mode">
+            <option value="0">0 Production</option>
+            <option value="1">1 HW Test</option>
+            <option value="2">2 Joy Test</option>
+            <option value="3">3 Auto Test</option>
+          </select>
+        </div>
+        <div class="gain-sub">Motor</div>
+        <div class="gain-row">
+          <label>max_speed</label>
+          <input type="number" id="sys-maxspd" value="40" min="1" max="100" step="1">
+          <span class="gunit">%</span>
+        </div>
+        <div class="gain-row">
+          <label>ramp_rate</label>
+          <input type="number" id="sys-ramp" value="50" min="1" max="500" step="1">
+          <span class="gunit">×0.001</span>
+        </div>
+        <div class="gain-sub">Encoder</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <label style="font-size:0.7rem;color:#99aacc;width:52px">inverted</label>
+          <select id="sys-encinv" style="background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 6px;font-size:0.73rem">
+            <option value="0">No</option>
+            <option value="1" selected>Yes</option>
+          </select>
+        </div>
+        <button class="btn primary" style="margin-top:8px;width:100%" onclick="mbApplySys()">Apply System → Board</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     TAB 4 — DEPLOY
+══════════════════════════════════════════════ -->
+<div id="tab-deploy" class="tab-pane">
+  <div style="padding:8px 12px;font-size:0.68rem;color:#445;border-bottom:1px solid #1e2030">
+    Write parameters to board and release port for BaseSystem.exe
+  </div>
+  <div style="padding:10px 14px">
+    <div class="deploy-grid">
+
+      <div class="card">
+        <h3>Write All Params to Board</h3>
+        <p style="font-size:0.7rem;color:#556;margin-bottom:9px">
+          Writes PID + trajectory values to all Modbus registers and triggers apply (reg 0x0F = 1).
+        </p>
+        <div style="display:flex;gap:7px">
+          <button class="btn primary" onclick="deployWriteAll()">📤 Write to Board</button>
+          <button class="btn" onclick="deploySaveLocal()">💾 Save Local</button>
+          <button class="btn" onclick="deployLoadLocal()">📂 Load Local</button>
+        </div>
+        <div id="deploy-status" style="margin-top:7px;font-size:0.7rem;color:#556;min-height:18px"></div>
+      </div>
+
+      <div class="card">
+        <h3>Raw Modbus</h3>
+        <div class="raw-row"><label>Reg (hex)</label><input type="number" id="raw-reg" value="0" min="0" max="255"></div>
+        <div class="raw-row"><label>Count</label><input type="number" id="raw-cnt" value="1" min="1" max="16"></div>
+        <div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
+          <button class="btn" onclick="rawRead()">FC03 Read</button>
+          <input type="number" id="raw-val" value="0" style="width:68px;background:#12141a;border:1px solid #2a2d3a;color:#ccc;border-radius:4px;padding:3px 6px">
+          <button class="btn warn" onclick="rawWrite()">FC06 Write</button>
+        </div>
+        <div id="raw-resp">—</div>
+      </div>
+
+    </div>
+
+    <div class="release-section">
+      <div style="font-size:0.75rem;color:#aaa;margin-bottom:7px">
+        Release serial port ก่อนเปิด BaseSystem.exe<br>
+        <span style="font-size:0.65rem;color:#445">BaseSystem.exe ใช้ LPUART1 port เดียวกัน — ต้อง disconnect web UI ก่อน</span>
+      </div>
+      <button class="btn danger" style="font-size:0.82rem;padding:7px 18px" onclick="releaseForBaseSystem()">
+        🔌 Release Port → BaseSystem.exe
+      </button>
+      <div class="release-msg" id="release-msg">
+        ✓ Serial port released — สามารถเปิด BaseSystem.exe ได้แล้ว
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     SCRIPT
+══════════════════════════════════════════════ -->
 <script>
-// ── Pin lists ──────────────────────────────────────────────────────────────
-const LEFT_PINS  = ['PD2','PC11','PC10','PC12','PA15','GND','PB7','PC13','PC2','PC3','PC0','PC1','PB0','PA4','PA1','PA0'];
-const RIGHT_PINS = ['PC9','PC8','PC6','PC5','PB12','PB11','PB2','PB1','CANH','CANL','PB15','PB14','PB13','PC4/PA2','PB8','PB9','PA8','PA9'];
-const FIXED_PINS = new Set(['GND','CANH','CANL','PB8','PB9','PC4/PA2']);
+'use strict';
 
-// ── Function catalog ──────────────────────────────────────────────────────
-const FUNC_GROUPS = [
-  { group: 'Motor & Encoder', color: '#7ab3ff', funcs: [
-    { id: 'MOTOR_DIR',    label: 'MOTOR_DIR',         dir: 'OUT', note: 'Cytron DIR input' },
-    { id: 'PWM_TIM3',     label: 'PWM (TIM3)',         dir: 'OUT', note: 'Motor PWM 20kHz', validPins: ['PA6','PA7','PB0','PB7','PC6','PC8','PC9'] },
-    { id: 'ENC_A',        label: 'ENC_A (TIM1 CH1)',   dir: 'IN',  note: 'Encoder A — TIM1 CH1 AF6', validPins: ['PA8'] },
-    { id: 'ENC_B',        label: 'ENC_B (TIM1 CH2)',   dir: 'IN',  note: 'Encoder B — TIM1 CH2 AF6', validPins: ['PA9'] },
-  ]},
-  { group: 'Safety', color: '#ff8888', funcs: [
-    { id: 'ESTOP',        label: 'ESTOP input',         dir: 'IN',  note: 'PULLUP, active LOW, 200ms debounce' },
-    { id: 'RESET_BTN',    label: 'RESET_BTN',           dir: 'IN',  note: 'PULLUP, active LOW' },
-    { id: 'MODE',         label: 'MODE switch',          dir: 'IN',  note: 'PULLUP, EXTI, LOW=AUTO' },
-    { id: 'EMER_OUTPUT',  label: 'EMER_OUTPUT relay',    dir: 'OUT', note: 'Active HIGH' },
-  ]},
-  { group: 'Actuators', color: '#ffaa44', funcs: [
-    { id: 'POWER_LATCH',  label: 'POWER_LATCH',          dir: 'OUT', note: 'Cylinder DOWN / power latch' },
-    { id: 'GRIPPER',      label: 'GRIPPER solenoid',      dir: 'OUT', note: 'Gripper open/close' },
-    { id: 'PNEUMATIC',    label: 'PNEUMATIC solenoid',    dir: 'OUT', note: 'Pneumatic aux' },
-  ]},
-  { group: 'Tower Lights', color: '#cc99ff', funcs: [
-    { id: 'TOWER_G',      label: 'TOWER_G (Green)',       dir: 'OUT', note: '' },
-    { id: 'TOWER_Y',      label: 'TOWER_Y (Yellow)',      dir: 'OUT', note: '' },
-    { id: 'TOWER_R',      label: 'TOWER_R (Red)',         dir: 'OUT', note: '' },
-  ]},
-  { group: 'Reed Switches', color: '#55cc88', funcs: [
-    { id: 'REED_UP',      label: 'REED_UP',               dir: 'IN',  note: 'PULLDOWN, cylinder UP' },
-    { id: 'REED_DOWN',    label: 'REED_DOWN',             dir: 'IN',  note: 'PULLDOWN, cylinder DOWN' },
-    { id: 'REED_GRIP',    label: 'REED_GRIP',             dir: 'IN',  note: 'PULLDOWN, gripper closed' },
-  ]},
-  { group: 'Sensors', color: '#ff6699', funcs: [
-    { id: 'HOME_SENSOR',  label: 'HOME_SENSOR',           dir: 'IN',  note: 'PULLUP, EXTI rising, HIGH=detected', validPins: ['PA3','PB3','PC3','PD3','PE3'] },
-    { id: 'CURRENT_ADC',  label: 'CURRENT_ADC',           dir: 'IN',  note: 'ADC analog input', validPins: ['PA0','PA1','PA2','PA3','PA4','PA5','PB0','PB1','PC0','PC1','PC2','PC3','PC4','PC5','PC4/PA2'] },
-  ]},
-  // Communication fixed on hardware — not assignable:
-  //   PC10/PC11 = USART3 → RP2040 joystick (fixed on PCB)
-  //   PA2/PA3   = LPUART1 Modbus → ST-Link VCP (internal NUCLEO)
-  { group: 'System', color: '#ffee66', funcs: [
-    { id: 'POWER_BTN',    label: 'POWER_BTN',             dir: 'IN',  note: 'PULLUP, active LOW' },
-    { id: 'RESET_LED',    label: 'RESET_LED',             dir: 'OUT', note: 'Status LED' },
-    { id: 'HEARTBEAT',    label: 'HEARTBEAT_LED',         dir: 'OUT', note: 'Blink LED (1 Hz)' },
-    { id: 'GPIO_OUT',     label: 'GPIO Output (general)', dir: 'OUT', note: '' },
-    { id: 'GPIO_IN',      label: 'GPIO Input (general)',  dir: 'IN',  note: '' },
-  ]},
+/* ── Pin data ─────────────────────────────── */
+const IFACE_PINS = [
+  {pin:'PA15', name:'ESTOP',       note:'PULLUP · LOW=active',  scan:'ESTOP'},
+  {pin:'PB7',  name:'POWER_BTN',  note:'PULLUP · LOW=active',  scan:'POWER_BTN'},
+  {pin:'PC13', name:'RESET_BTN',  note:'PULLUP · LOW=active',  scan:'RESET_BTN'},
+  {pin:'PC3',  name:'HOME_SENSOR',note:'PULLUP · HIGH=detect', scan:'HOME_SENSOR'},
+  {pin:'PC2',  name:'MODE',       note:'PULLUP switch',        scan:'MODE'},
+];
+const TOP_PINS = [
+  {pin:'VIN', func:'EXT PWR',  color:'#ffaa44'},
+  {pin:'PC9', func:'PWM TIM3', color:'#7ab3ff'},
+  {pin:'PA7', func:'REED_UP',  color:'#55cc88', scan:'REED_UP'},
+  {pin:'PA6', func:'(GPIO)',   color:'#334455'},
+  {pin:'PA5', func:'(GPIO)',   color:'#334455'},
+];
+const LEFT_PINS = [
+  {pin:'PD2',  func:'RESET_LED',   color:'#ffee66'},
+  {pin:'PC11', func:'EMER_OUTPUT', color:'#ff7777'},
+  {pin:'PB12', func:'POWER_LATCH', color:'#ffaa44'},
+  {pin:'PB2',  func:'GRIPPER',     color:'#ffaa44'},
+  {pin:'PB1',  func:'PNEUMATIC',   color:'#ffaa44'},
+  {pin:'PB15', func:'TOWER_G',     color:'#bb88ff'},
+  {pin:'PB14', func:'TOWER_Y',     color:'#bb88ff'},
+  {pin:'PB13', func:'TOWER_R',     color:'#bb88ff'},
+  {pin:'PC7',  func:'MOTOR_DIR',   color:'#7ab3ff'},
+];
+const RIGHT_PINS = [
+  {pin:'PA7', func:'REED_UP',      dir:'IN',  color:'#55cc88', scan:'REED_UP'},
+  {pin:'PA4', func:'REED_DOWN',    dir:'IN',  color:'#55cc88', scan:'REED_DOWN'},
+  {pin:'PB0', func:'REED_GRIP',    dir:'IN',  color:'#55cc88', scan:'REED_GRIP'},
+  {pin:'PA0', func:'CURRENT_ADC',  dir:'ADC', color:'#ff6699'},
+  {pin:'PA8', func:'ENC_A (TIM1)', dir:'ENC', color:'#7ab3ff'},
+  {pin:'PA9', func:'ENC_B (TIM1)', dir:'ENC', color:'#7ab3ff'},
 ];
 
-// ── Category color lookup ─────────────────────────────────────────────────
-const FUNC_COLOR = {};
-const FUNC_META  = {};
-FUNC_GROUPS.forEach(g => {
-  g.funcs.forEach(f => {
-    FUNC_COLOR[f.id] = g.color;
-    FUNC_META[f.id]  = { ...f, groupColor: g.color };
+/* ── Build Tab 1 ──────────────────────────── */
+function buildConfig() {
+  // Interface pins
+  const ir = document.getElementById('iface-row');
+  IFACE_PINS.forEach(p => {
+    ir.innerHTML += `<div class="iface-pin">
+      <div class="ip-name">${p.name}</div>
+      <div class="ip-pin">${p.pin}</div>
+      <div class="ip-note">${p.note}</div>
+      <div class="ip-live" id="ilv-${p.scan}">—</div>
+    </div>`;
   });
-});
-
-// ── Fixed pin assignments (cannot be changed) ─────────────────────────────
-const FIXED_ASSIGN = {
-  'GND':     { label: 'GND',                      color: '#555' },
-  'CANH':    { label: 'CAN Bus H (TJA1050)',       color: '#66dd66' },
-  'CANL':    { label: 'CAN Bus L (TJA1050)',       color: '#66dd66' },
-  'PB8':     { label: 'USART3 TX → RP2040',        color: '#55ddcc' },
-  'PB9':     { label: 'USART3 RX ← RP2040',        color: '#55ddcc' },
-  'PC4/PA2': { label: 'LPUART1 TX (ST-Link/VCP)',  color: '#55ddcc' },
-};
-
-// ── Current firmware config (NUCLEO) ──────────────────────────────────────
-const FIRMWARE_NUCLEO = {
-  'PA0':  'MOTOR_DIR', 'PA6':  'PWM_TIM3',
-  'PA8':  'ENC_A',     'PA9':  'ENC_B',
-  'PC3':  'HOME_SENSOR',
-  'PA1':  'REED_UP',   'PA4':  'REED_DOWN', 'PB0': 'REED_GRIP',
-  'PB13': 'ESTOP',     'PC13': 'RESET_BTN',
-  'PB10': 'POWER_BTN', 'PB5':  'MODE',
-  'PC1':  'POWER_LATCH','PB11': 'GRIPPER',  'PC6': 'PNEUMATIC',
-  'PC7':  'TOWER_G',   'PB7':  'TOWER_Y',  'PC8': 'TOWER_R',
-  'PB14': 'EMER_OUTPUT','PB4': 'RESET_LED',
-  'PA5':  'HEARTBEAT',
-  'PA2':  'LPUART1_TX','PA3':  'LPUART1_RX',
-  'PC10': 'USART3_TX', 'PC11': 'USART3_RX',
-  'PC4':  'CURRENT_ADC',
-};
-
-// ── PCB ใหม่ (แก้ pin มีปัญหาแล้ว) ───────────────────────────────────────
-// การเปลี่ยนจาก user's export:
-//   PC0  → ESTOP      ❌ PC0↔PC1 short  →  ย้ายไป PA15 (clean)
-//   PB11 → RESET_LED  ⚠ GND_SHORT        →  ย้ายไป PD2  (clean)
-//   PC4/PA2 → EMER    ❌ PC4=VCC, PA2=LPUART → ย้ายไป PC6  (clean)
-//   PA0  → MOTOR_DIR  (เดิม) → เปลี่ยนเป็น CURRENT_ADC (PA0=ADC2_IN1, clean)
-//   PC8  → MOTOR_DIR  (เดิม TOWER_R) → motor dir
-//   Modbus TX: PC4/PA2 → LPUART1_TX (PA2 คือ physical pin)
-const FIRMWARE_NEW_PCB = {
-  // Motor & Encoder
-  'PC9':     'PWM_TIM3',    // TIM3 CH4 AF2 — ย้ายจาก PA6
-  'PC8':     'MOTOR_DIR',   // GPIO OUT — ย้ายจาก PA0
-  'PA8':     'ENC_A',
-  'PA9':     'ENC_B',
-  // Sensors
-  'PC3':     'HOME_SENSOR',
-  'PA0':     'CURRENT_ADC', // ADC2_IN1 — clean, ย้ายจาก PC4
-  // Reed switches
-  'PA1':     'REED_UP',     // monitor — inconsistent VCC_SHORT บางรอบ
-  'PA4':     'REED_DOWN',
-  'PB0':     'REED_GRIP',
-  // Safety  ← ทั้งหมดย้ายไป pin สะอาด
-  'PA15':    'ESTOP',       // ย้ายจาก PC0 (PC0↔PC1 short)
-  'PC13':    'RESET_BTN',
-  'PC6':     'EMER_OUTPUT', // ย้ายจาก PC4/PA2 (PC4=VCC_SHORT)
-  // System
-  'PC2':     'MODE',
-  'PB7':     'POWER_BTN',
-  'PD2':     'RESET_LED',   // ย้ายจาก PB11 (GND_SHORT)
-  // Actuators
-  'PB12':    'POWER_LATCH',
-  'PB2':     'GRIPPER',
-  'PB1':     'PNEUMATIC',
-  // Tower lights
-  'PB15':    'TOWER_G',
-  'PB14':    'TOWER_Y',
-  'PB13':    'TOWER_R',
-  // PC10/PC11/PC4-PA2 = fixed hardware, ไม่ต้อง assign
-};
-const NEW_PCB_FIXED = FIRMWARE_NEW_PCB;
-
-// ── State ─────────────────────────────────────────────────────────────────
-const assignment = {};  // pin → funcId
-
-// ── Build dropdown ────────────────────────────────────────────────────────
-function makeSelect(pin) {
-  const sel = document.createElement('select');
-  sel.className = 'func-sel';
-  sel.id = 'sel-' + pin.replace('/','_');
-
-  const defOpt = document.createElement('option');
-  defOpt.value = ''; defOpt.textContent = '— ไม่ได้ assign —';
-  sel.appendChild(defOpt);
-
-  FUNC_GROUPS.forEach(g => {
-    const og = document.createElement('optgroup');
-    og.label = g.group;
-    g.funcs.forEach(f => {
-      const o = document.createElement('option');
-      o.value = f.id;
-      const af_warn = f.validPins && !f.validPins.includes(pin) ? ' ⚠' : '';
-      o.textContent = f.label + af_warn;
-      og.appendChild(o);
-    });
-    sel.appendChild(og);
+  // Top connector
+  const tc = document.getElementById('tc-pins');
+  TOP_PINS.forEach(p => {
+    tc.innerHTML += `<div class="tc-pin">
+      <div class="tc-dot" style="background:${p.color}"></div>
+      <div class="tc-pname">${p.pin}</div>
+      <div class="tc-func">${p.func}</div>
+      <div class="tc-badge" id="${p.scan?'tcb-'+p.scan:''}">—</div>
+    </div>`;
   });
-
-  sel.addEventListener('change', () => {
-    assignment[pin] = sel.value || null;
-    updateRow(pin);
-    updateAll();
+  // Left col
+  const lc = document.getElementById('left-col');
+  LEFT_PINS.forEach(p => {
+    lc.innerHTML += `<div class="pin-row">
+      <span class="pr-func">${p.func}</span>
+      <span class="pr-dot" style="background:${p.color}"></span>
+      <span class="pr-label">${p.pin}</span>
+      <span class="pr-dir out">OUT</span>
+    </div>`;
   });
-  return sel;
+  // Right col
+  const rc = document.getElementById('right-col');
+  RIGHT_PINS.forEach(p => {
+    rc.innerHTML += `<div class="pin-row">
+      <span class="pr-dir ${p.dir.toLowerCase()}">${p.dir}</span>
+      <span class="pr-dot" style="background:${p.color}"></span>
+      <span class="pr-label">${p.pin}</span>
+      <span class="pr-func">${p.func}</span>
+      ${p.scan ? `<span class="pr-live" id="plv-${p.scan}">—</span>` : ''}
+    </div>`;
+  });
 }
 
-// ── Build pin rows ─────────────────────────────────────────────────────────
-function buildCol(pins, colId, isLeft) {
-  const col = document.getElementById(colId);
-  pins.forEach(pin => {
-    const row = document.createElement('div');
-    row.className = 'pin-row';
-    row.id = 'row-' + pin.replace('/','_');
+/* ── Build Tab 2 ──────────────────────────── */
+const OUT_NAMES = ['TOWER_R','TOWER_Y','TOWER_G','GRIPPER','PNEUMATIC','POWER_LATCH','RESET_LED','EMER_OUT'];
+const IN_NAMES  = ['REED_UP','REED_DOWN','REED_GRIP','HOME_SENSOR','ESTOP','POWER_BTN','RESET_BTN','MODE'];
+// bit order matches joystick.h XInput masks
+const JOY_BTNS = ['▲','▼','◀','▶','STR','SEL','L3','R3','LB','RB','T','·','A','B','X','Y'];
 
-    const label = document.createElement('div');
-    label.className = 'pin-label';
-    label.textContent = pin;
+function buildTest() {
+  const og = document.getElementById('out-grid');
+  OUT_NAMES.forEach(n => {
+    og.innerHTML += `<div class="out-item">
+      <label>${n.replace(/_/g,'<br>')}</label>
+      <label class="sw">
+        <input type="checkbox" id="sw-${n}" onchange="ltToggleOut('${n}',this.checked)">
+        <span class="sw-track"></span><span class="sw-thumb"></span>
+      </label>
+    </div>`;
+  });
+  const ig = document.getElementById('in-grid');
+  IN_NAMES.forEach(n => {
+    ig.innerHTML += `<div class="in-item" id="in-${n}">
+      <label>${n.replace(/_/g,' ')}</label>
+      <span class="in-badge lo">LOW</span>
+    </div>`;
+  });
+  const jbg = document.getElementById('joy-bg');
+  JOY_BTNS.forEach((b,i) => { jbg.innerHTML += `<div class="jbtn" id="jb-${i}">${b}</div>`; });
+}
 
-    const dot = document.createElement('div');
-    dot.className = 'pin-dot';
-    dot.id = 'dot-' + pin.replace('/','_');
+/* ── Tab switching ─────────────────────────── */
+function showTab(id, btn) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+}
 
-    const warn = document.createElement('div');
-    warn.className = 'warn-icon';
-    warn.id = 'warn-' + pin.replace('/','_');
+/* ── Serial state ──────────────────────────── */
+let ltPort=null, ltRawWriter=null, ltReader=null, ltRunning=false;
+let ltQueue=[], ltBusy=false, ltBusyTO=null;
+let scanData={}, connMode='none';
+let scanTimer=null, joyTimer=null, pollTimer=null;
+let mbBuffer=new Uint8Array(256), mbBufLen=0;
+let mbResolve=null, mbTimeout=null;
 
-    if (FIXED_PINS.has(pin)) {
-      const fixed = FIXED_ASSIGN[pin];
-      dot.style.background = fixed.color;
-      const lbl = document.createElement('div');
-      lbl.style.cssText = 'font-size:0.68rem;color:'+fixed.color+';flex:1;';
-      lbl.textContent = fixed.label;
-      if (isLeft) row.append(label, dot, lbl, warn);
-      else        row.append(warn, lbl, dot, label);
-    } else {
-      const sel = makeSelect(pin);
-      if (isLeft) row.append(label, dot, sel, warn);
-      else        row.append(warn, sel, dot, label);
+function ltLog(cls,msg) {
+  const el=document.getElementById('lt-log'); if(!el) return;
+  const d=document.createElement('div'); d.className=cls; d.textContent=msg;
+  el.appendChild(d);
+  if(el.children.length>300) el.removeChild(el.firstChild);
+  el.scrollTop=el.scrollHeight;
+}
+
+async function ltGetWriter() {
+  if(!ltRawWriter && ltPort) ltRawWriter=ltPort.writable.getWriter();
+  return ltRawWriter;
+}
+async function ltSendRaw(str) {
+  if(!ltPort) return;
+  const trimmed=str.trim();
+  const silent=(trimmed==='J'||trimmed==='SCAN');
+  try { const w=await ltGetWriter(); await w.write(new TextEncoder().encode(str)); if(!silent) ltLog('tx','→ '+trimmed); }
+  catch(e) { ltLog('er','TX: '+e.message); }
+}
+async function ltWriteBin(u8) {
+  if(!ltPort) return;
+  try { const w=await ltGetWriter(); await w.write(u8); }
+  catch(e) { ltLog('er','TX bin: '+e.message); }
+}
+
+function ltSend(cmd) { ltQueue.push(cmd); ltDrain(); }
+async function ltDrain() {
+  if(ltBusy||!ltQueue.length||!ltPort) return;
+  ltBusy=true; const cmd=ltQueue.shift();
+  await ltSendRaw(cmd+'\n');
+  ltBusyTO=setTimeout(()=>{ ltBusy=false; ltDrain(); },200);
+}
+function ltReleaseBusy() { clearTimeout(ltBusyTO); ltBusy=false; ltDrain(); }
+
+/* ── Connect / Disconnect ────────────────── */
+async function ltConnect() {
+  if(!('serial' in navigator)) { alert('Web Serial ต้องใช้ Chrome หรือ Edge'); return; }
+  try {
+    ltPort=await navigator.serial.requestPort();
+    await ltPort.open({baudRate:230400,dataBits:8,parity:'even',stopBits:1});
+  } catch(e) { ltLog('er','Open: '+e.message); ltPort=null; return; }
+  ltRunning=true; setUI(true);
+  ltLog('ii','Port opened — detecting mode...');
+  startReading();
+  await autoDetect();
+}
+
+async function ltDisconnect() {
+  ltRunning=false;
+  clearInterval(scanTimer); clearInterval(joyTimer); clearInterval(pollTimer);
+  scanTimer=joyTimer=pollTimer=null;
+  try { if(ltReader)    await ltReader.cancel();   } catch{}
+  try { if(ltRawWriter) ltRawWriter.releaseLock(); } catch{}
+  try { if(ltPort)      await ltPort.close();      } catch{}
+  ltPort=ltRawWriter=ltReader=null;
+  ltQueue=[]; ltBusy=false; connMode='none';
+  setUI(false); ltLog('ii','Disconnected');
+}
+
+function setUI(on) {
+  document.getElementById('dot').className='dot'+(on?' on':'');
+  document.getElementById('conn-lbl').textContent=on?'Connected':'Disconnected';
+  document.getElementById('btn-con').style.display=on?'none':'';
+  document.getElementById('btn-dis').style.display=on?'':'none';
+  if(!on){const b=document.getElementById('mode-badge');b.className='';b.textContent='—';}
+}
+
+/* ── Auto-detect ─────────────────────────── */
+let detectLines=[];
+async function autoDetect() {
+  detectLines=[]; mbBufLen=0;
+  await ltSendRaw('PING\n');
+  await delay(350);
+  if(detectLines.some(l=>l.includes('PONG'))) { setMode('pcb'); return; }
+  await ltWriteBin(modbRead(0x00,1));
+  await delay(350);
+  if(mbBufLen>=7 && mbBuffer[0]===21 && mbBuffer[1]===0x03) { setMode('fw'); }
+  else { ltLog('ii','Mode unknown — defaulting PCB Test'); setMode('pcb'); }
+  mbBufLen=0;
+}
+
+function setMode(m) {
+  connMode=m;
+  const b=document.getElementById('mode-badge');
+  if(m==='pcb') { b.className='pcb'; b.textContent='PCB Test'; ltLog('ii','✓ PCB Test mode'); startPcbLoops(); }
+  else          { b.className='fw';  b.textContent='Main FW';  ltLog('ii','✓ Main FW mode');  startPollLoop(); }
+}
+
+/* ── Read loop ───────────────────────────── */
+async function startReading() {
+  try {
+    ltReader=ltPort.readable.getReader();
+    const dec=new TextDecoder(); let buf='';
+    while(ltRunning) {
+      const {value,done}=await ltReader.read(); if(done) break;
+      if(connMode==='fw') {
+        for(const b of value) if(mbBufLen<mbBuffer.length) mbBuffer[mbBufLen++]=b;
+        tryResolveMb();
+      } else {
+        // accumulate raw bytes for Modbus detection even before mode is set
+        if(connMode==='none') {
+          for(const b of value) if(mbBufLen<mbBuffer.length) mbBuffer[mbBufLen++]=b;
+        }
+        buf+=dec.decode(value);
+        const lines=buf.split('\n'); buf=lines.pop();
+        for(const l of lines) {
+          const s=l.trim(); if(!s) continue;
+          const silent=s.startsWith('J:')||s.startsWith('SCAN:');
+          if(!silent) ltLog('rx','← '+s);
+          detectLines.push(s); ltHandleLine(s);
+        }
+      }
     }
-    col.appendChild(row);
+  } catch(e) { if(ltRunning) ltLog('er','Read: '+e.message); }
+  finally { try{ltReader.releaseLock();}catch{} }
+}
+
+function ltHandleLine(line) {
+  ltReleaseBusy();
+  if(line.startsWith('SCAN:')) handleScan(line);
+  else if(line.startsWith('J:')) handleJoy(line);
+}
+
+/* ── SCAN ────────────────────────────────── */
+function handleScan(line) {
+  const parts = line.replace('SCAN:','').split('|');
+  // parts[0] = digital inputs
+  parts[0].split(',').forEach(p=>{
+    const [k,v]=p.split('='); if(k) scanData[k.trim()]=parseInt(v)||0;
   });
-}
-
-// ── Update single row color ───────────────────────────────────────────────
-function updateRow(pin) {
-  const dot  = document.getElementById('dot-' + pin.replace('/','_'));
-  const warn = document.getElementById('warn-' + pin.replace('/','_'));
-  if (!dot) return;
-
-  const fid = assignment[pin];
-  if (!fid) { dot.style.background = '#333'; if(warn) warn.textContent = ''; return; }
-
-  const meta = FUNC_META[fid];
-  dot.style.background = meta ? meta.groupColor : '#555';
-
-  // AF warning
-  if (meta && meta.validPins && !meta.validPins.includes(pin)) {
-    if (warn) { warn.textContent = '⚠'; warn.title = 'ต้องการ pin: ' + meta.validPins.join(' / ') + '\n(' + meta.note + ')'; }
-  } else {
-    if (warn) warn.textContent = '';
-  }
-}
-
-// ── Update summary + diff + conflicts ─────────────────────────────────────
-function updateAll() {
-  updateSummary();
-  updateDiff();
-  updateConflicts();
-}
-
-function getFuncLabel(fid) {
-  const m = FUNC_META[fid];
-  return m ? m.label : fid;
-}
-
-function updateSummary() {
-  const tbl = document.getElementById('summary-table');
-  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
-  const rows = allPins.map(pin => {
-    const fid   = FIXED_PINS.has(pin) ? null : assignment[pin];
-    const fixed = FIXED_ASSIGN[pin];
-    if (fixed) {
-      return `<tr><td class="s-pin">${pin}</td><td class="s-func" style="color:${fixed.color}">${fixed.label}</td></tr>`;
-    }
-    if (!fid) return `<tr><td class="s-pin">${pin}</td><td class="s-empty">—</td></tr>`;
-    const color = FUNC_META[fid]?.groupColor || '#ccc';
-    const isNew = FIRMWARE_NUCLEO[pin] !== fid && NEW_PCB_FIXED[pin] === fid;
-    return `<tr><td class="s-pin">${pin}</td><td class="s-func${isNew?' s-new':''}" style="color:${color}">${getFuncLabel(fid)}</td></tr>`;
-  });
-  tbl.innerHTML = rows.join('');
-}
-
-function updateDiff() {
-  const box = document.getElementById('diff-box');
-  const changes = [];
-  const allPins = [...LEFT_PINS, ...RIGHT_PINS].filter(p => !FIXED_PINS.has(p));
-
-  allPins.forEach(pin => {
-    const cur = assignment[pin];
-    const old = FIRMWARE_NUCLEO[pin];
-    if (!cur && !old) return;
-    if (cur === old) {
-      changes.push({ type:'ok', pin, cur, old });
-    } else if (cur && !old) {
-      changes.push({ type:'new', pin, cur });
-    } else if (!cur && old) {
-      changes.push({ type:'removed', pin, old });
-    } else {
-      changes.push({ type:'changed', pin, cur, old });
-    }
-  });
-
-  if (!changes.length) { box.innerHTML = '<span style="color:#444">โหลด config เพื่อดู diff</span>'; return; }
-
-  const changed = changes.filter(c => c.type !== 'ok');
-  if (!changed.length) { box.innerHTML = '<span style="color:#55aa55">✓ ตรงกับ firmware ทุกพิน</span>'; return; }
-
-  box.innerHTML = changed.map(c => {
-    if (c.type === 'changed')
-      return `<div class="diff-row diff-new">⟳ <b>${c.pin}</b>: ${getFuncLabel(c.old)||'—'} → ${getFuncLabel(c.cur)}</div>`;
-    if (c.type === 'new')
-      return `<div class="diff-row diff-new">+ <b>${c.pin}</b>: ${getFuncLabel(c.cur)}</div>`;
-    if (c.type === 'removed')
-      return `<div class="diff-row diff-old">− <b>${c.pin}</b>: ${getFuncLabel(c.old)} ถูกลบ</div>`;
-    return '';
-  }).join('');
-}
-
-function updateConflicts() {
-  const box = document.getElementById('conflict-box');
-  const used = {};
-  const errors   = [];  // red — ต้องแก้
-  const warnings = [];  // orange — AF mismatch
-  const missing  = [];  // yellow — ยังไม่ assign
-
-  // 1. duplicate function check
-  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
-    const fid = assignment[pin];
-    if (!fid) return;
-    if (used[fid]) errors.push(`✖ ${getFuncLabel(fid)} assign 2 พิน: ${used[fid]} + ${pin}`);
-    else used[fid] = pin;
-  });
-
-  // 2. AF pin compatibility check
-  [...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
-    const fid = assignment[pin];
-    if (!fid) return;
-    const meta = FUNC_META[fid];
-    if (meta?.validPins && !meta.validPins.includes(pin))
-      warnings.push(`⚠ ${pin} → ${getFuncLabel(fid)}: ต้องการ ${meta.validPins.join(' / ')}`);
-  });
-
-  // 3. missing functions — ทุก function ที่ยังไม่มีพิน
-  FUNC_GROUPS.forEach(g => {
-    g.funcs.forEach(f => {
-      if (f.id === 'GPIO_OUT' || f.id === 'GPIO_IN') return; // generic, skip
-      const assigned = [...LEFT_PINS,...RIGHT_PINS].find(p => assignment[p] === f.id);
-      if (!assigned) missing.push(f);
+  // |ENC:cnt=X,deg=X.X
+  const encPart = parts.find(s=>s.startsWith('ENC:'));
+  if(encPart){
+    encPart.replace('ENC:','').split(',').forEach(p=>{
+      const [k,v]=p.split('='); if(k) scanData['ENC_'+k.trim().toUpperCase()]=parseFloat(v)||0;
     });
-  });
-
-  // 4. unassigned PCB pins
-  const unassignedPins = [...LEFT_PINS,...RIGHT_PINS].filter(p =>
-    !FIXED_PINS.has(p) && !assignment[p]
-  );
-
-  let html = '';
-
-  if (errors.length) {
-    html += `<div style="color:#ff6666;font-weight:600;margin:4px 0">❌ Errors (${errors.length})</div>`;
-    html += errors.map(e => `<div class="conflict-item" style="color:#ff6666">${e}</div>`).join('');
+    const ce=document.getElementById('sc-enc-cnt'); if(ce) ce.textContent=scanData['ENC_CNT']??'—';
+    const de=document.getElementById('sc-enc-deg'); if(de) de.textContent=(scanData['ENC_DEG']??0).toFixed(1);
   }
-
-  if (warnings.length) {
-    html += `<div style="color:#ffaa44;font-weight:600;margin:6px 0 2px">⚠ AF Warnings (${warnings.length})</div>`;
-    html += warnings.map(w => `<div class="conflict-item" style="color:#ffaa44">${w}</div>`).join('');
-  }
-
-  if (unassignedPins.length) {
-    html += `<div style="color:#888;font-weight:600;margin:6px 0 2px">○ พินที่ยังว่าง (${unassignedPins.length})</div>`;
-    html += `<div style="color:#555;font-size:0.68rem;line-height:1.8">${unassignedPins.join(' · ')}</div>`;
-  }
-
-  if (missing.length) {
-    html += `<div style="color:#ffcc44;font-weight:600;margin:6px 0 2px">? Functions ยังไม่มีพิน (${missing.length})</div>`;
-
-    const byGroup = {};
-    missing.forEach(f => {
-      const g = FUNC_GROUPS.find(g => g.funcs.includes(f));
-      if (!byGroup[g.group]) byGroup[g.group] = { color: g.color, funcs: [] };
-      byGroup[g.group].funcs.push(f.label);
+  // |ADC:mA=X
+  const adcPart = parts.find(s=>s.startsWith('ADC:'));
+  if(adcPart){
+    adcPart.replace('ADC:','').split(',').forEach(p=>{
+      const [k,v]=p.split('='); if(k) scanData['ADC_'+k.trim().toUpperCase()]=parseInt(v)||0;
     });
-    Object.entries(byGroup).forEach(([grp, data]) => {
-      html += `<div style="color:${data.color};font-size:0.68rem;margin-top:3px">
-        <b>${grp}:</b> ${data.funcs.join(', ')}
-      </div>`;
-    });
+    const am=document.getElementById('sc-adc-ma'); if(am) am.textContent=scanData['ADC_MA']??'—';
+  }
+  updateInputUI(); updatePinBadges();
+  const el=document.getElementById('scan-age'); if(el) el.textContent=new Date().toLocaleTimeString();
+}
+
+function updateInputUI() {
+  IN_NAMES.forEach(name=>{
+    const el=document.getElementById('in-'+name); if(!el) return;
+    const v=scanData[name]; const b=el.querySelector('.in-badge'); if(!b) return;
+    b.className='in-badge '+(v?'hi':'lo'); b.textContent=v?'HIGH':'LOW';
+  });
+}
+
+function updatePinBadges() {
+  RIGHT_PINS.filter(p=>p.scan).forEach(p=>{
+    const el=document.getElementById('plv-'+p.scan); if(!el) return;
+    const v=scanData[p.scan];
+    el.className='pr-live '+(v===undefined?'':v?'hi':'lo');
+    el.textContent=v===undefined?'—':v?'H':'L';
+  });
+  IFACE_PINS.forEach(p=>{
+    const el=document.getElementById('ilv-'+p.scan); if(!el) return;
+    const v=scanData[p.scan];
+    el.className='ip-live '+(v===undefined?'':v?'hi':'lo');
+    el.textContent=v===undefined?'—':v?'HIGH':'LOW';
+  });
+  const tc=document.getElementById('tcb-REED_UP');
+  if(tc){ const v=scanData['REED_UP']; tc.className='tc-badge '+(v===undefined?'':v?'hi':'lo'); tc.textContent=v===undefined?'—':v?'H':'L'; }
+}
+
+/* ── Joystick ────────────────────────────── */
+// Firmware format: J:rp,joy,lx,ly,rx,ry,lt,rt,btns
+// rp=RP2040 connected, joy=joystick connected, btns=4-char hex string
+function handleJoy(line) {
+  const d=line.replace('J:','');
+  if(d==='connected')    { document.getElementById('joy-st').textContent='● connected'; return; }
+  if(d==='disconnected') { document.getElementById('joy-st').textContent='disconnected'; return; }
+  const parts=d.split(','); if(parts.length<9) return;
+  const rp=parseInt(parts[0]), joy=parseInt(parts[1]);
+  const lx=parseInt(parts[2]), ly=parseInt(parts[3]);
+  const rx=parseInt(parts[4]), ry=parseInt(parts[5]);
+  const lt=parseInt(parts[6]), rt=parseInt(parts[7]);
+  const btnsHex=parts[8]||'0000';
+  const btns=parseInt(btnsHex,16)||0;
+  document.getElementById('joy-st').textContent = rp ? (joy ? '● joy connected' : '● rp2040 only') : 'disconnected';
+  document.getElementById('joy-lv').textContent=`${lx}, ${ly}`;
+  document.getElementById('joy-rv').textContent=`${rx}, ${ry}`;
+  document.getElementById('lt-f').style.width=(lt/255*100).toFixed(0)+'%';
+  document.getElementById('rt-f').style.width=(rt/255*100).toFixed(0)+'%';
+  document.getElementById('lt-v').textContent=lt;
+  document.getElementById('rt-v').textContent=rt;
+  drawStick('joy-l',lx,-ly); drawStick('joy-r',rx,-ry);
+  JOY_BTNS.forEach((_,i)=>{ const el=document.getElementById('jb-'+i); if(el) el.className='jbtn'+(btns&(1<<i)?' on':''); });
+}
+function drawStick(id,x,y) {
+  const c=document.getElementById(id); if(!c) return;
+  const ctx=c.getContext('2d'),w=c.width,h=c.height,cx=w/2,cy=h/2,r=cx-4;
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='#252836'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,4); ctx.lineTo(cx,h-4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(4,cy); ctx.lineTo(w-4,cy); ctx.stroke();
+  const px=cx+(x/32767)*r, py=cy+(y/32767)*r;
+  ctx.fillStyle='#4466ee'; ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2); ctx.fill();
+}
+
+/* ── Loops ───────────────────────────────── */
+function startPcbLoops() {
+  clearInterval(scanTimer); clearInterval(joyTimer);
+  scanTimer=setInterval(()=>{ if(connMode!=='none') ltDoScan(); },800);
+  joyTimer =setInterval(()=>{ if(connMode!=='none') ltSend('J'); },50);
+  ltDoScan();
+}
+function ltDoScan() { ltSend('SCAN'); }
+
+/* ── Motor ───────────────────────────────── */
+function ltToggleOut(name,on) { ltSend(`SET:${name}:${on?1:0}`); }
+function ltMotorFwd()  { ltSend(`PWM:FWD:${document.getElementById('pwm-sl').value||25}`); }
+function ltMotorRev()  { ltSend(`PWM:REV:${document.getElementById('pwm-sl').value||25}`); }
+function ltMotorStop() { ltSend('PWM:STOP'); }
+function ltPwmVal(v)   { document.getElementById('pwm-sl').value=v; document.getElementById('pwm-disp').textContent=v+'%'; }
+
+/* ── Macro ───────────────────────────────── */
+let macros=[];
+function macroRender() {
+  const list=document.getElementById('mc-list'); list.innerHTML='';
+  macros.forEach((cmd,i)=>{
+    const d=document.createElement('div'); d.className='mc-item'; d.draggable=true; d.dataset.i=i;
+    d.innerHTML=`<span class="mc-handle">⠿</span><span class="mc-cmd">${cmd}</span><span class="mc-del" onclick="macroRemove(${i})">✕</span>`;
+    d.addEventListener('dragstart',e=>{e.dataTransfer.setData('text',i);d.classList.add('dragging');});
+    d.addEventListener('dragend',()=>d.classList.remove('dragging'));
+    d.addEventListener('dragover',e=>e.preventDefault());
+    d.addEventListener('drop',e=>{ const from=parseInt(e.dataTransfer.getData('text')),to=parseInt(d.dataset.i); macros.splice(to,0,macros.splice(from,1)[0]); macroRender(); });
+    list.appendChild(d);
+  });
+}
+function macroAdd() { const inp=document.getElementById('mc-inp'),cmd=inp.value.trim(); if(cmd){macros.push(cmd);macroRender();inp.value='';} }
+function macroRemove(i) { macros.splice(i,1); macroRender(); }
+function macroClear() { macros=[]; macroRender(); }
+async function macroRun() { for(const cmd of macros){ if(cmd.startsWith('DELAY:')) await delay(parseInt(cmd.split(':')[1])||100); else ltSend(cmd); await delay(250); } }
+function macroSave() { localStorage.setItem('lt-macros',JSON.stringify(macros)); ltLog('ii','Macros saved'); }
+function macroLoad() { try{macros=JSON.parse(localStorage.getItem('lt-macros')||'[]');macroRender();}catch{} }
+function macroPreset(t) {
+  if(t==='io')    macros=['SET:TOWER_R:1','DELAY:400','SET:TOWER_Y:1','DELAY:400','SET:TOWER_G:1','DELAY:400','SET:TOWER_R:0','SET:TOWER_Y:0','SET:TOWER_G:0'];
+  if(t==='motor') macros=['PWM:FWD:20','DELAY:1000','PWM:REV:20','DELAY:1000','PWM:STOP'];
+  if(t==='tower') macros=['SET:TOWER_R:1','DELAY:250','SET:TOWER_R:0','SET:TOWER_Y:1','DELAY:250','SET:TOWER_Y:0','SET:TOWER_G:1','DELAY:250','SET:TOWER_G:0'];
+  macroRender();
+}
+
+/* ── Modbus ──────────────────────────────── */
+function modbCrc(buf) {
+  let crc=0xFFFF;
+  for(const b of buf){ crc^=b; for(let i=0;i<8;i++) crc=(crc&1)?((crc>>>1)^0xA001):(crc>>>1); }
+  return crc;
+}
+function modbRead(reg,count) {
+  const f=new Uint8Array(8); f[0]=21;f[1]=0x03;f[2]=reg>>8;f[3]=reg&0xFF;f[4]=count>>8;f[5]=count&0xFF;
+  const crc=modbCrc(f.slice(0,6)); f[6]=crc&0xFF; f[7]=crc>>8; return f;
+}
+function modbWrite(reg,val) {
+  const v=val&0xFFFF, f=new Uint8Array(8); f[0]=21;f[1]=0x06;f[2]=reg>>8;f[3]=reg&0xFF;f[4]=v>>8;f[5]=v&0xFF;
+  const crc=modbCrc(f.slice(0,6)); f[6]=crc&0xFF; f[7]=crc>>8; return f;
+}
+function tryResolveMb() {
+  if(!mbResolve||mbBufLen<5) return;
+  const b=mbBuffer; if(b[0]!==21){mbBufLen=0;return;}
+  let exp; if(b[1]===0x03&&mbBufLen>=3) exp=3+b[2]+2; else if(b[1]===0x06) exp=8; else{mbBufLen=0;mbResolve(null);mbResolve=null;clearTimeout(mbTimeout);return;}
+  if(mbBufLen>=exp) { const frame=b.slice(0,exp); clearTimeout(mbTimeout); mbBufLen=0; const res=mbResolve; mbResolve=null; res(frame); }
+}
+async function mbTransaction(frame,ms=500) {
+  if(!ltPort) return null;
+  return new Promise(resolve=>{ mbBufLen=0; mbResolve=resolve; mbTimeout=setTimeout(()=>{ mbBufLen=0; mbResolve=null; resolve(null); },ms); ltWriteBin(frame); });
+}
+async function mbReadReg(reg,count=1) {
+  const resp=await mbTransaction(modbRead(reg,count)); if(!resp||resp[1]!==0x03) return null;
+  const bc=resp[2], vals=[];
+  for(let i=0;i<bc;i+=2){ let v=(resp[3+i]<<8)|resp[4+i]; if(v>32767) v-=65536; vals.push(v); }
+  return count===1?vals[0]:vals;
+}
+async function mbWriteReg(reg,val) { return (await mbTransaction(modbWrite(reg,val)))!==null; }
+
+/* ── Arm position gauge ──────────────────── */
+function drawGauge(pos, vel, target) {
+  const c=document.getElementById('arm-gauge'); if(!c) return;
+  const ctx=c.getContext('2d');
+  const W=c.width, H=c.height, cx=W/2, cy=H/2, R=Math.min(W,H)/2-6;
+  const toA=deg=>(deg-90)*Math.PI/180;
+
+  ctx.clearRect(0,0,W,H);
+
+  // Outer ring background
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.fillStyle='#0a0d14'; ctx.fill();
+  ctx.strokeStyle='#2a3050'; ctx.lineWidth=2; ctx.stroke();
+
+  // Safe zone arc (green, ±150°)
+  ctx.beginPath(); ctx.arc(cx,cy,R-3,toA(-150),toA(150));
+  ctx.strokeStyle='#0a3a1a'; ctx.lineWidth=6; ctx.stroke();
+  // Warning zones (±150° → ±180°)
+  ctx.beginPath(); ctx.arc(cx,cy,R-3,toA(150),toA(180));
+  ctx.strokeStyle='#5a1010'; ctx.lineWidth=6; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,R-3,toA(-180),toA(-150));
+  ctx.strokeStyle='#5a1010'; ctx.lineWidth=6; ctx.stroke();
+
+  // Tick marks
+  for(let d=0;d<360;d+=30){
+    const a=(d-90)*Math.PI/180;
+    const isMaj=(d%90===0);
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*(R-4), cy+Math.sin(a)*(R-4));
+    ctx.lineTo(cx+Math.cos(a)*(isMaj?R-14:R-10), cy+Math.sin(a)*(isMaj?R-14:R-10));
+    ctx.strokeStyle=isMaj?'#445566':'#2a3040'; ctx.lineWidth=1; ctx.stroke();
   }
 
-  if (!html) html = '<span style="color:#3a7a3a">✓ ครบทุก function ไม่มี conflict</span>';
-  box.innerHTML = html;
-}
+  // HOME dot at 0° (top)
+  ctx.beginPath(); ctx.arc(cx,cy-R+10,3,0,Math.PI*2);
+  ctx.fillStyle='#33cc66'; ctx.fill();
 
-// ── Load presets ──────────────────────────────────────────────────────────
-function applyConfig(config) {
-  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
-  allPins.forEach(pin => {
-    if (FIXED_PINS.has(pin)) return;
-    const fid = config[pin] || null;
-    assignment[pin] = fid;
-    const sel = document.getElementById('sel-' + pin.replace('/','_'));
-    if (sel) sel.value = fid || '';
-    updateRow(pin);
-  });
-  updateAll();
-}
-
-function loadFirmwareDefaults() { applyConfig(FIRMWARE_NUCLEO); }
-function loadNewPCBDefaults()   { applyConfig(NEW_PCB_FIXED); }
-
-function clearAll() {
-  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
-  allPins.forEach(pin => {
-    if (FIXED_PINS.has(pin)) return;
-    assignment[pin] = null;
-    const sel = document.getElementById('sel-' + pin.replace('/','_'));
-    if (sel) sel.value = '';
-    updateRow(pin);
-  });
-  updateAll();
-}
-
-function exportSummary() {
-  const allPins = [...LEFT_PINS, ...RIGHT_PINS];
-  let lines = ['/* Pin Assignment Export — 1-DOF Robot */', ''];
-  allPins.forEach(pin => {
-    const fid = FIXED_PINS.has(pin) ? FIXED_ASSIGN[pin]?.label : assignment[pin];
-    if (fid) lines.push(`  ${pin.padEnd(12)} → ${getFuncLabel(fid)}`);
-  });
-  lines.push('');
-  lines.push('/* IOC changes needed vs NUCLEO: */');
-  allPins.filter(p => !FIXED_PINS.has(p)).forEach(pin => {
-    const cur = assignment[pin];
-    const old = FIRMWARE_NUCLEO[pin];
-    if (cur && cur !== old)
-      lines.push(`  ${pin.padEnd(12)} ${getFuncLabel(old)||'(unassigned)'} → ${getFuncLabel(cur)}`);
-  });
-
-  const blob = new Blob([lines.join('\n')], {type:'text/plain'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'pin_assignment.txt';
-  a.click();
-}
-
-// ── PCB Test Health (from pin_short_test results) ─────────────────────────
-const PCB_STATUS = {
-  'PC4':     { s:'bad',  n:'short กับ PC5→VCC → ADC = 4095 เสมอ' },
-  'PC5':     { s:'bad',  n:'VCC_SHORT บน PCB ทุกรอบ' },
-  'PC4/PA2': { s:'bad',  n:'PC4 short กับ PC5→VCC + PA2=LPUART1 conflict' },
-  'PA1':     { s:'warn', n:'VCC_SHORT บน PCB (บางรอบ) → ใช้เป็น digital IN ได้ แต่เสี่ยง' },
-  'PC0':     { s:'warn', n:'PC0↔PC1 short (บางรอบ) → ESTOP เสี่ยง false-trigger' },
-  'PC1':     { s:'warn', n:'PC0↔PC1 short (บางรอบ)' },
-  'PB11':    { s:'warn', n:'GND_SHORT บน PCB (บางรอบ) → output อาจถูกดึงลง' },
-  'PC10':    { s:'warn', n:'short กับ PC12 (บางรอบ) — ใช้เป็น output ได้แต่เสี่ยง' },
-  'PC12':    { s:'warn', n:'short กับ PC10 (บางรอบ) — ควรปล่อยว่าง' },
-  'PB8':     { s:'ok',   n:'USART3 TX → RP2040 — VCC/GND ในเทสคือ UART idle ปกติ' },
-  'PB9':     { s:'ok',   n:'USART3 RX ← RP2040 — fixed on PCB' },
-  'PA11':    { s:'warn', n:'VCC_SHORT บน PCB (USB D-) — ถ้าไม่ใช้ USB ไม่กระทบ' },
-  'PA12':    { s:'warn', n:'VCC_SHORT บน PCB (USB D+) — ถ้าไม่ใช้ USB ไม่กระทบ' },
-};
-
-function healthBadge(pin) {
-  const h = PCB_STATUS[pin];
-  if (!h) return null;
-  const d = document.createElement('span');
-  d.className = 'health-badge ' + (h.s === 'bad' ? 'health-bad' : 'health-warn');
-  d.textContent = h.s === 'bad' ? '✖ BAD' : '⚠ WARN';
-  d.title = h.n;
-  return d;
-}
-
-// ── Import from TXT ────────────────────────────────────────────────────────
-function importFromFile() {
-  const inp = document.createElement('input');
-  inp.type = 'file'; inp.accept = '.txt';
-  inp.onchange = e => {
-    const f = e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = ev => {
-      const cfg = parseTxt(ev.target.result);
-      const count = Object.keys(cfg).length;
-      applyConfig(cfg);
-      alert('Import สำเร็จ — โหลด ' + count + ' pin assignment');
-    };
-    r.readAsText(f);
-  };
-  inp.click();
-}
-
-function parseTxt(text) {
-  // build reverse label→id and id→id lookup
-  const lookup = {};
-  FUNC_GROUPS.forEach(g => g.funcs.forEach(f => {
-    lookup[f.label.toLowerCase().trim()] = f.id;
-    lookup[f.id.toLowerCase().trim()]    = f.id;
-  }));
-
-  const allPins = new Set([...LEFT_PINS, ...RIGHT_PINS]);
-  const cfg = {};
-  for (const line of text.split('\n')) {
-    // match "  PIN   → FUNCTION LABEL"
-    const m = line.match(/^\s*([\w/]+)\s*[→\->]+\s*(.+?)\s*$/);
-    if (!m) continue;
-    const pin  = m[1].trim();
-    const lbl  = m[2].trim().toLowerCase();
-    if (!allPins.has(pin) || FIXED_PINS.has(pin)) continue;
-    const fid = lookup[lbl];
-    if (fid) cfg[pin] = fid;
+  // Target line (dashed orange)
+  if(target!==null && Math.abs(target-pos)>0.5){
+    const ta=toA(target);
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+Math.cos(ta)*(R-18), cy+Math.sin(ta)*(R-18));
+    ctx.strokeStyle='#ff8822'; ctx.lineWidth=1.5;
+    ctx.setLineDash([4,3]); ctx.stroke(); ctx.setLineDash([]);
   }
-  return cfg;
+
+  // Velocity arc (cyan, thin outer)
+  const maxVel=180;
+  const velClamp=Math.max(-maxVel,Math.min(maxVel,vel));
+  if(Math.abs(velClamp)>1){
+    const vStart=toA(0), vEnd=toA(velClamp);
+    ctx.beginPath(); ctx.arc(cx,cy,R-1,vStart,vEnd,velClamp<0);
+    ctx.strokeStyle=velClamp>0?'#2288aa':'#aa4422'; ctx.lineWidth=2; ctx.stroke();
+  }
+
+  // Arm shadow + arm
+  const pa=toA(pos);
+  const armLen=R-16;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(pa)*armLen, cy+Math.sin(pa)*armLen);
+  ctx.strokeStyle='rgba(80,140,255,0.18)'; ctx.lineWidth=8; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(pa)*armLen, cy+Math.sin(pa)*armLen);
+  const grad=ctx.createLinearGradient(cx,cy,cx+Math.cos(pa)*armLen,cy+Math.sin(pa)*armLen);
+  grad.addColorStop(0,'#3366cc'); grad.addColorStop(1,'#88bbff');
+  ctx.strokeStyle=grad; ctx.lineWidth=3; ctx.stroke();
+  // tip
+  ctx.beginPath(); ctx.arc(cx+Math.cos(pa)*armLen,cy+Math.sin(pa)*armLen,5,0,Math.PI*2);
+  ctx.fillStyle='#aaccff'; ctx.fill();
+
+  // Hub
+  ctx.beginPath(); ctx.arc(cx,cy,7,0,Math.PI*2);
+  ctx.fillStyle='#1a2040'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
+  ctx.fillStyle='#5577cc'; ctx.fill();
+
+  // Position text (center)
+  ctx.font='bold 15px Segoe UI'; ctx.fillStyle='#aaccff';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(pos.toFixed(1)+'°', cx, cy+R*0.52);
+  ctx.font='10px Segoe UI'; ctx.fillStyle='#445566';
+  ctx.fillText((vel>=0?'+':'')+vel.toFixed(1)+'°/s', cx, cy+R*0.72);
 }
 
-// patch buildCol to insert health badge
-const _origBuildCol = buildCol;
+/* ── Poll loop ───────────────────────────── */
+const SYS_LABELS={0:'IDLE',1:'HOMING',2:'PICK',4:'PLACE',8:'MOVING'};
+async function mbDoPoll() {
+  if(connMode!=='fw'||!ltPort) return;
+  // Read 0x26–0x32 = 13 registers
+  const vals=await mbReadReg(0x26,13); if(!vals||!Array.isArray(vals)) return;
+  const reed=vals[0], sys=vals[1], pos=vals[2]/10, vel=vals[3]/10;
+  const acc=vals[10]/10, estop=vals[11], io=vals[12];
+  const rs=[reed&1?'UP':'',reed&2?'DN':'',reed&4?'GRP':''].filter(Boolean).join('+')||'—';
+  const target=parseFloat(document.getElementById('go-pos')?.value)||null;
+  document.getElementById('st-pos').textContent=pos.toFixed(1);
+  document.getElementById('st-vel').textContent=vel.toFixed(1);
+  document.getElementById('st-acc').textContent=acc.toFixed(1);
+  document.getElementById('st-sys').textContent=SYS_LABELS[sys]||('0x'+sys.toString(16));
+  document.getElementById('st-reed').textContent=rs;
+  const eb=document.getElementById('estop-badge');
+  eb.textContent=estop?'E-STOP ACTIVE':'E-STOP OK';
+  eb.className='estop-badge '+(estop?'act':'ok');
+  // IO badges from reg[0x32]
+  function setIoBadge(id, active, labelHi, labelLo){
+    const el=document.getElementById(id); if(!el) return;
+    el.textContent=active?labelHi:labelLo;
+    el.className='io-badge '+(active?'hi':'lo');
+  }
+  setIoBadge('iob-home', io&0x01, 'HOME ●',    'HOME ○');
+  setIoBadge('iob-pwr',  io&0x02, 'PWR_BTN ●', 'PWR_BTN ○');
+  setIoBadge('iob-rst',  io&0x04, 'RST_BTN ●', 'RST_BTN ○');
+  setIoBadge('iob-mode', io&0x08, 'MODE MANUAL','MODE AUTO');
+  const cur=await mbReadReg(0x3A); if(cur!==null) document.getElementById('st-cur').textContent=cur;
+  drawGauge(pos,vel,target);
+}
+async function startPollLoop() {
+  clearInterval(pollTimer);
+  // Read current sys params from board on connect
+  const sv=await mbReadReg(0x33,4);
+  if(sv&&Array.isArray(sv)){
+    const sel=document.getElementById('sys-mode'); if(sel) sel.value=sv[0]&0x03;
+    const ms=document.getElementById('sys-maxspd'); if(ms) ms.value=sv[1];
+    const rr=document.getElementById('sys-ramp'); if(rr) rr.value=sv[2];
+    const ei=document.getElementById('sys-encinv'); if(ei) ei.value=sv[3]&0x01;
+  }
+  pollTimer=setInterval(mbDoPoll,200); mbDoPoll();
+}
 
-// ── Init ──────────────────────────────────────────────────────────────────
-buildCol(LEFT_PINS,  'col-left',  true);
-buildCol(RIGHT_PINS, 'col-right', false);
+/* ── Control commands ────────────────────── */
+let actState = 0; // current reg[0x02] value (pneumatic/gripper bits)
 
-// inject health badges after build
-[...LEFT_PINS, ...RIGHT_PINS].forEach(pin => {
-  if (FIXED_PINS.has(pin)) return;
-  const row = document.getElementById('row-' + pin.replace('/','_'));
-  if (!row) return;
-  const badge = healthBadge(pin);
-  if (!badge) return;
-  // append before last child (warn-icon)
-  row.appendChild(badge);
-});
-updateAll();
+async function mbCmd(cmd) {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  switch(cmd){
+    case 'home':    await mbWriteReg(0x01,0x01); break;
+    case 'sethome': await mbWriteReg(0x01,0x08); break;
+    case 'abort':   await mbWriteReg(0x25,0x01); break;
+    case 'estop':   await mbWriteReg(0x19,0x01); break;
+    case 'manual':  await mbWriteReg(0x01,0x02); break;
+    case 'auto':    await mbWriteReg(0x01,0x04); break;
+    case 'idle':    await mbWriteReg(0x01,0x00); await mbWriteReg(0x05,0x00); break;
+    case 'goto':    await mbWriteReg(0x24,(parseInt(document.getElementById('go-pos').value)||0)&0xFFFF); break;
+    // legacy
+    case 'grip1':   actState|=0x01; await mbWriteReg(0x02,actState); break;
+    case 'grip0':   actState&=~0x01; await mbWriteReg(0x02,actState); break;
+  }
+  ltLog('ii','CMD: '+cmd);
+}
 
-// Auto-load new PCB on start
-loadNewPCBDefaults();
+async function mbJog(deg) {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  const val = (deg & 0xFFFF); // signed 16-bit
+  await mbWriteReg(0x05, val);
+  ltLog('ii','JOG: '+(deg>0?'+':'')+deg+'°');
+}
+
+async function mbActuator(act) {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  switch(act){
+    case 'pneu_down':  actState |=  0x01; break;
+    case 'pneu_up':    actState &= ~0x01; break;
+    case 'grip_close': actState = (actState & 0x01) | 0x04; break;
+    case 'grip_open':  actState = (actState & 0x01) | 0x02; break;
+  }
+  await mbWriteReg(0x02, actState & 0xFFFF);
+  ltLog('ii','ACT: '+act+' (0x'+actState.toString(16)+')');
+}
+
+async function mbTestRun() {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  const s = parseInt(document.getElementById('test-start').value)||0;
+  const e = parseInt(document.getElementById('test-end').value)||90;
+  const r = parseInt(document.getElementById('test-rep').value)||5;
+  await mbWriteReg(0x09, s & 0xFFFF);
+  await mbWriteReg(0x10, e & 0xFFFF);
+  await mbWriteReg(0x11, r & 0xFFFF);
+  await mbWriteReg(0x01, 0x10);
+  ltLog('ii','TEST: '+s+'°↔'+e+'° ×'+r);
+}
+async function mbApplyPID() {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  await mbWriteReg(0x0C,Math.round(parseFloat(document.getElementById('g-kpv').value)*100));
+  await mbWriteReg(0x0D,Math.round(parseFloat(document.getElementById('g-kiv').value)*100));
+  await mbWriteReg(0x0E,Math.round(parseFloat(document.getElementById('g-kdv').value)*100));
+  await mbWriteReg(0x3D,Math.round(parseFloat(document.getElementById('g-kpp').value)*100));
+  await mbWriteReg(0x3E,Math.round(parseFloat(document.getElementById('g-kdp').value)*100));
+  await mbWriteReg(0x3F,Math.round(parseFloat(document.getElementById('g-kip').value)*100));
+  await mbWriteReg(0x0F,1); ltLog('ii','PID applied');
+}
+async function mbApplyTraj() {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  await mbWriteReg(0x38,parseInt(document.getElementById('tr-type').value));
+  await mbWriteReg(0x39,Math.round(parseFloat(document.getElementById('tr-vmax').value)*100));
+  await mbWriteReg(0x3B,Math.round(parseFloat(document.getElementById('tr-amax').value)*100));
+  await mbWriteReg(0x3C,Math.round(parseFloat(document.getElementById('tr-jmax').value)*100));
+  await mbWriteReg(0x0F,1); ltLog('ii','Traj applied');
+}
+
+async function mbApplySys() {
+  if(connMode!=='fw'){ltLog('er','Not in Main FW mode');return;}
+  const mode   = parseInt(document.getElementById('sys-mode').value)||0;
+  const maxspd = parseInt(document.getElementById('sys-maxspd').value)||40;
+  const ramp   = parseInt(document.getElementById('sys-ramp').value)||50;
+  const encinv = parseInt(document.getElementById('sys-encinv').value)||0;
+  await mbWriteReg(0x33, mode);
+  await mbWriteReg(0x34, maxspd);
+  await mbWriteReg(0x35, ramp);
+  await mbWriteReg(0x36, encinv);
+  ltLog('ii','Sys applied — mode='+mode+' maxspd='+maxspd+'% ramp='+ramp+' enc_inv='+encinv);
+}
+
+/* ── Deploy ──────────────────────────────── */
+async function deployWriteAll() {
+  if(connMode!=='fw'){alert('Not in Main FW mode');return;}
+  document.getElementById('deploy-status').textContent='Writing...';
+  await mbApplyPID(); await mbApplyTraj();
+  document.getElementById('deploy-status').textContent='✓ Done at '+new Date().toLocaleTimeString();
+}
+function deploySaveLocal() {
+  const d={kpv:document.getElementById('g-kpv').value,kiv:document.getElementById('g-kiv').value,kdv:document.getElementById('g-kdv').value,kpp:document.getElementById('g-kpp').value,kdp:document.getElementById('g-kdp').value,kip:document.getElementById('g-kip').value,trType:document.getElementById('tr-type').value,vmax:document.getElementById('tr-vmax').value,amax:document.getElementById('tr-amax').value,jmax:document.getElementById('tr-jmax').value};
+  localStorage.setItem('1dof-params',JSON.stringify(d));
+  document.getElementById('deploy-status').textContent='✓ Saved';
+}
+function deployLoadLocal() {
+  try{const d=JSON.parse(localStorage.getItem('1dof-params')||'{}');
+  if(d.kpv!==undefined){document.getElementById('g-kpv').value=d.kpv;document.getElementById('g-kiv').value=d.kiv;document.getElementById('g-kdv').value=d.kdv;document.getElementById('g-kpp').value=d.kpp;document.getElementById('g-kdp').value=d.kdp;document.getElementById('g-kip').value=d.kip;document.getElementById('tr-type').value=d.trType;document.getElementById('tr-vmax').value=d.vmax;document.getElementById('tr-amax').value=d.amax;document.getElementById('tr-jmax').value=d.jmax;document.getElementById('deploy-status').textContent='✓ Loaded';}}catch{}
+}
+async function rawRead() {
+  const reg=parseInt(document.getElementById('raw-reg').value)||0, cnt=parseInt(document.getElementById('raw-cnt').value)||1;
+  const resp=await mbTransaction(modbRead(reg,cnt));
+  document.getElementById('raw-resp').textContent=resp?Array.from(resp).map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '):'No response';
+}
+async function rawWrite() {
+  const reg=parseInt(document.getElementById('raw-reg').value)||0, val=parseInt(document.getElementById('raw-val').value)||0;
+  const resp=await mbTransaction(modbWrite(reg,val));
+  document.getElementById('raw-resp').textContent=resp?Array.from(resp).map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '):'No response';
+}
+async function releaseForBaseSystem() { await ltDisconnect(); document.getElementById('release-msg').style.display='block'; }
+
+function delay(ms){return new Promise(r=>setTimeout(r,ms));}
+
+/* ── Init ────────────────────────────────── */
+buildConfig();
+buildTest();
+macroLoad();
+drawGauge(0, 0, null);
 </script>
 </body>
 </html>
