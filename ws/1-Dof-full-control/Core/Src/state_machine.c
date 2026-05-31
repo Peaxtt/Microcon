@@ -264,7 +264,7 @@ void state_machine_tick(void)
       /* Accept mode commands */
       if (cmd_do_home)    { cmd_do_home = 0; hardware_set_motor(0.0f); control_reset(); hardware_homing_sensor_enable(); robot_state = ST_HOMING_FAST; }
       else if (cmd_go_manual) { cmd_go_manual = 0; control_reset(); robot_state = ST_MANUAL_MODBUS; }
-      else if (cmd_go_auto && robot_homed) { cmd_go_auto = 0; control_reset(); cmd_p2p_last = (float)(int16_t)mb_slave.registers[0x24]; robot_state = ST_AUTO; }
+      else if (cmd_go_auto && robot_homed) { cmd_go_auto = 0; control_reset(); cmd_p2p_last = cmd_p2p_deg; robot_state = ST_AUTO; }
       if (cmd_set_home)   { cmd_set_home = 0; hardware_finish_homing(); }
       handle_actuator_cmd();
       break;

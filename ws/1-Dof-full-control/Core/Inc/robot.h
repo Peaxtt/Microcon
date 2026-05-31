@@ -1,6 +1,7 @@
 #ifndef __ROBOT_H
 #define __ROBOT_H
 
+#include "main.h"
 #include <stdint.h>
 
 /* =========================================================================
