@@ -43,10 +43,10 @@ void modbus_tick_1ms(ModbusSlave_t *slave) {
 
 // Called by HAL_UARTEx_RxEventCallback
 void modbus_rx_cplt(ModbusSlave_t *slave, uint16_t Size) {
-  // If we receive data, reset the idle timer and mark as receiving
   slave->rx_len = Size;
-  slave->receiving = 0; // Finished receiving due to idle
+  slave->receiving = 0;
   slave->frame_ready = 1;
+  slave->dbg_frames_rx++;
 }
 
 static void modbus_send_response(ModbusSlave_t *slave, uint16_t len) {
@@ -67,6 +67,7 @@ void modbus_process(ModbusSlave_t *slave) {
         uint16_t crc_rx = slave->rx_buf[slave->rx_len - 2] | (slave->rx_buf[slave->rx_len - 1] << 8);
         
         if (crc_calc == crc_rx) {
+          slave->dbg_crc_ok++;
           uint8_t func = slave->rx_buf[1];
           uint16_t addr = (slave->rx_buf[2] << 8) | slave->rx_buf[3];
           uint16_t val = (slave->rx_buf[4] << 8) | slave->rx_buf[5];
@@ -84,6 +85,7 @@ void modbus_process(ModbusSlave_t *slave) {
           } else if (func == 0x06) { // Write Single Register
             if (addr < MODBUS_REG_COUNT) {
               slave->registers[addr] = val;
+              slave->dbg_reg_writes++;
               modbus_send_response(slave, 6);
             }
           }

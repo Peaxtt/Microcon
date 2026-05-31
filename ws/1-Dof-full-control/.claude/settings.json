@@ -11,7 +11,15 @@
       "PowerShell(pip install decompile3 2>&1)",
       "PowerShell(tail -3)",
       "PowerShell(pip install uncompyle6 2>&1)",
-      "Read(//c/PaYae/**)"
+      "Read(//c/PaYae/**)",
+      "Bash(Get-ChildItem -Path \"C:\\\\PaYae\\\\Control_by_due\\\\Control\" -Recurse -Force)",
+      "Bash(Select-Object FullName, Length, PSIsContainer)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(ls -lh Auto_Control/*.py)",
+      "Bash(ls -lh Auto_Control/.project Auto_Control/.cproject)"
+    ],
+    "additionalDirectories": [
+      "C:\\PaYae\\Control_by_due\\Control\\Controller\\Auto_Control\\Core\\Src"
     ]
   }
 }

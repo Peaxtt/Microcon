@@ -12,11 +12,16 @@ typedef struct {
   UART_HandleTypeDef *huart;
   uint8_t rx_buf[MODBUS_BUF_SIZE];
   uint16_t rx_len;
-  
-  // Timer based timeout
+
   uint32_t last_rx_time;
   uint8_t receiving;
   uint8_t frame_ready;
+
+  // Diagnostics — watch in Live Expressions to trace dropped frames
+  uint32_t dbg_frames_rx;    // frames received (frame_ready fired)
+  uint32_t dbg_crc_ok;       // frames that passed CRC + slave-ID check
+  uint32_t dbg_reg_writes;   // FC06 register writes actually applied
+  uint32_t dbg_errors;       // DMA re-arm from error callback
 } ModbusSlave_t;
 
 void modbus_init(ModbusSlave_t *slave, UART_HandleTypeDef *huart);
