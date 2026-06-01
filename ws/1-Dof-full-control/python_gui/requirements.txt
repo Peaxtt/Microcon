@@ -3,3 +3,4 @@ pyqtgraph
 pyserial
 scipy
 numpy
+websockets

@@ -187,6 +187,11 @@ static uint32_t      act_seq_timeout = 50;  // 100Hz ticks before forcing next s
 volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
 volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
 volatile uint8_t reed_grip = 0;   // gripper CLOSED
+/* Degrees from proximity sensor trigger point to the physical hole-0 mark.
+   Tune via Live Expressions after homing until hole 1 = 5°, hole 2 = 10°, etc.
+   Positive = sensor fires before hole 0 (most common). Default 0 = no offset. */
+volatile float   home_proximity_offset_deg = 0.0f;
+
 volatile uint8_t reed_dummy_en        = 1;     // 1 = simulate reed from GPIO output state
 volatile float   reed_dummy_delay_ms  = 30.0f; // delay before reed follows output (ms) — dummy mode only
 volatile float   reed_switch_delay_ms = 500.0f; // delay (ms) before switching from dummy to real reed
@@ -216,6 +221,9 @@ volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT afte
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
 volatile float   homing_slow_speed     = 0.06f; // PWM fraction for HOMING_SLOW (tunable live)
+/* Set 1 inside finish_homing() when proximity offset move is in progress.
+   STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
+volatile uint8_t homing_final_zero_pending = 0;
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -542,11 +550,11 @@ static void homing_exti_disable(void) {
   HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
 }
 
-// ── Finish homing: zero encoder + cumulative, mark homed ─────────────────
+// ── Finish homing: zero encoder at sensor, then move to proximity offset ─────
 static void finish_homing(void) {
   homing_exti_disable();
-  homing_sensor_flag   = 0;
-  // Zero encoder (processed next 1kHz tick)
+  homing_sensor_flag = 0;
+  /* Zero encoder at sensor position */
   __disable_irq();
   enc_reset_pending    = 1;
   cumulative_angle_deg = 0.0f;
@@ -557,8 +565,18 @@ static void finish_homing(void) {
   control_reset();
   homed = 1;
   eeprom_save(0.0f);
-  current_state = STATE_IDLE;
   mb_slave.registers[0x27] = 0;
+
+  if (home_proximity_offset_deg != 0.0f) {
+    /* Move to calibrated hole-0 position, then re-zero encoder there.
+       homing_final_zero_pending is checked in STATE_AUTO once ctrl_settled. */
+    homing_final_zero_pending = 1;
+    skip_p2p_entry = 1;
+    current_state  = STATE_AUTO;
+    start_move_deg(home_proximity_offset_deg);
+  } else {
+    current_state = STATE_IDLE;
+  }
 }
 
 // Start a trajectory move to target_deg (degrees). Delegates to control_set_target().
@@ -991,6 +1009,7 @@ int main(void)
       }
 
       // 3. Update Status Registers (BaseSystem v1.1)
+      mb_slave.registers[0x2F] = (uint16_t)current_state; /* state enum for GUI/BaseSystem */
       mb_slave.registers[0x23] = (uint16_t)homed;
       mb_slave.registers[0x26] = (reed_up   ? 1 : 0) |
                                  (reed_down ? 2 : 0) |
@@ -1097,7 +1116,7 @@ int main(void)
           mb_slave.registers[0x25] = 0;
           control_reset();
           motor_speed_cmd = 0.0f;
-          homed = 0;  /* must re-home after EMER — position is unknown */
+          /* homed stays as-is after EMER exit — user decides when to re-home */
           HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_SET);
           /* TOWER_R and RESET_LED cleared by tower lights on next tick */
           if (dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
@@ -1372,6 +1391,21 @@ int main(void)
           control_reset();
         }
         prev_state = current_state;
+
+        /* ── Post-homing proximity offset: re-zero encoder once arm settles ──────
+           finish_homing() sets homing_final_zero_pending=1 and moves to offset pos.
+           When settled here, zero the encoder so hole-0 = 0° exactly.            */
+        if (homing_final_zero_pending && ctrl_settled) {
+          homing_final_zero_pending = 0;
+          __disable_irq();
+          enc_reset_pending    = 1;
+          cumulative_angle_deg = 0.0f;
+          ctrl_direct_target   = 0.0f;
+          ctrl_traj_start      = 0.0f;
+          __enable_irq();
+          control_reset();
+          current_state = STATE_IDLE;
+        }
 
         // ── Go Home: LT + B → วิ่งกลับ 0° ทางที่ใกล้ที่สุดด้วย PID ───────────────
         if (joy_is_connected() && joy_lt_f() > 0.5f && joy_btn(BTN_B)) {
@@ -1649,10 +1683,10 @@ int main(void)
             mb_slave.registers[0x27] = 0x08;
             {
               static float last_mb_target = -99999.0f;
-              /* P2P hole index: negative = right-side hole → (72+N) */
+              /* P2P hole index: negative = right-side hole → (72+N), then add proximity offset */
               int16_t p2p_raw  = (int16_t)mb_slave.registers[0x24];
               int16_t p2p_hole = (p2p_raw >= 0) ? p2p_raw : (int16_t)(72 + p2p_raw);
-              float mb_target_deg = (float)p2p_hole * 5.0f;
+              float mb_target_deg = (float)p2p_hole * 5.0f + home_proximity_offset_deg;
               if (skip_p2p_entry) {
                 // Entered from jog/mode cmd — sync last target without moving
                 last_mb_target  = mb_target_deg;
@@ -1719,7 +1753,7 @@ int main(void)
                 mb_slave.registers[0x27] = 0x02;
                 int16_t pick_raw  = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2];
                 int16_t pick_hole = (pick_raw >= 0) ? pick_raw : (int16_t)(72 + pick_raw);
-                float pick_deg = (float)pick_hole * 5.0f;
+                float pick_deg = (float)pick_hole * 5.0f + home_proximity_offset_deg;
                 if (seq_mb_timer == 0) {
                   HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); /* open pre-move */
                   start_move_deg(pick_deg);
@@ -1771,7 +1805,7 @@ int main(void)
                 int16_t place_raw   = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2 + 1];
                 int16_t place_hole  = (place_raw >= 0) ? place_raw
                                                        : (int16_t)(pick_hole2 + 72 + place_raw);
-                float place_deg = (float)place_hole * 5.0f;
+                float place_deg = (float)place_hole * 5.0f + home_proximity_offset_deg;
                 if (seq_mb_timer == 0) {
                   start_move_deg(place_deg);
                   seq_mb_timer = 1;

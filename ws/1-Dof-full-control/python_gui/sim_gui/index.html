@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>1-DOF Robot — Simulator &amp; Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Chart.js from CDN (no build step required) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div class="app-layout">
+
+  <!-- ══════════════════════════════════════════════════════════════════════════
+       LEFT COLUMN — WORKSPACE (disk + stats)
+       ══════════════════════════════════════════════════════════════════════════ -->
+  <div style="display:flex; flex-direction:column; gap:12px;">
+
+    <!-- LOG -->
+    <div class="card">
+      <div class="card-title">LOG</div>
+      <div id="log-panel">[--:--:--] Waiting for server…</div>
+    </div>
+
+    <!-- STATS -->
+    <div class="card">
+      <div class="card-title">STATS</div>
+      <div class="stats-grid">
+        <div class="stat-row">
+          <span class="stat-label">Position</span>
+          <span><span class="stat-value" id="stat-pos">0.0</span><span class="stat-unit">Deg</span></span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Gripper</span>
+          <span class="stat-value" id="stat-gripper" style="color:var(--ink-muted)">Idle / Open</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Speed</span>
+          <span><span class="stat-value" id="stat-speed">0.00</span><span class="stat-unit">rad/s</span></span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Mode</span>
+          <span class="stat-value" id="stat-mode">INIT</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Accel</span>
+          <span><span class="stat-value" id="stat-accel">0.00</span><span class="stat-unit">rad/s²</span></span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Emergency</span>
+          <span class="stat-value" id="stat-emer" style="color:var(--ink-muted)">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- WORKSPACE DISK -->
+    <div class="card">
+      <div class="card-title">WORKSPACE</div>
+      <div id="disk-container"></div>
+      <div class="disk-legend">
+        <span><span class="legend-dot" style="background:var(--accent)"></span>Pick</span>
+        <span><span class="legend-dot" style="background:var(--blue)"></span>Place</span>
+        <span><span class="legend-dot" style="background:var(--purple)"></span>Both</span>
+      </div>
+      <p class="text-muted" style="text-align:center; margin-top:6px;" id="disk-hint">
+        Select a hole to set home
+      </p>
+      <div class="flex gap-2 mt-2">
+        <button class="btn w-full" id="btn-set-home">SET HOME</button>
+        <button class="btn btn-primary w-full" id="btn-home">HOME</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════════
+       CENTRE COLUMN — GRAPHS
+       ══════════════════════════════════════════════════════════════════════════ -->
+  <div style="display:flex; flex-direction:column; gap:12px;">
+
+    <div class="card" style="flex:1;">
+      <div class="card-title" style="display:flex; justify-content:space-between;">
+        <span>GRAPHS</span>
+        <div class="flex gap-2">
+          <button class="btn btn-ghost" id="btn-clear-graph" style="padding:2px 8px; font-size:11px;">
+            Clear
+          </button>
+        </div>
+      </div>
+      <div id="graph-container">
+        <canvas id="graph-canvas"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════════
+       RIGHT COLUMN — CONTROL TABS
+       ══════════════════════════════════════════════════════════════════════════ -->
+  <div class="card" style="overflow-y:auto; max-height:calc(100vh - 80px);">
+
+    <!-- Tab bar -->
+    <div class="tab-bar">
+      <button class="tab-btn" data-tab="auto">AUTO</button>
+      <button class="tab-btn active" data-tab="manual">MANUAL</button>
+      <button class="tab-btn" data-tab="test">TEST MODE</button>
+    </div>
+
+    <!-- ── AUTO tab ────────────────────────────────────────────────────────── -->
+    <div id="auto-panel" class="tab-panel hidden">
+
+      <!-- Pick and Place section -->
+      <div class="card-title" style="margin-top:4px;">Pick and Place</div>
+
+      <div class="seq-header">
+        <label style="font-size:12px; color:var(--ink-muted);">Number of target</label>
+        <input type="number" id="n-target" min="1" max="8" value="3"
+               style="width:52px; border:1px solid var(--border); border-radius:6px;
+                      padding:3px 6px; font-size:13px; font-weight:600;">
+        <button class="btn btn-ghost" id="btn-random" title="Random" style="padding:4px 8px;">
+          🔀
+        </button>
+      </div>
+
+      <!-- Pair table -->
+      <table class="pair-table">
+        <thead>
+          <tr><th>#</th><th>Pick hole</th><th>Place hole</th><th>Move</th></tr>
+        </thead>
+        <tbody id="pair-table-body">
+          <!-- Filled by ControlsView.renderPairs() -->
+        </tbody>
+      </table>
+
+      <div class="flex gap-2 mt-2" style="align-items:center;">
+        <label style="font-size:12px; color:var(--ink-muted);">
+          <input type="checkbox" id="gripper-check" checked> Gripper
+        </label>
+      </div>
+
+      <div class="flex gap-2 mt-2">
+        <button class="btn w-full" id="btn-preview">Preview Path</button>
+        <button class="btn w-full" id="btn-simulate">Simulate</button>
+      </div>
+      <div id="sim-status" class="mt-2"></div>
+
+      <button class="btn btn-primary w-full mt-2" id="btn-start-seq">START</button>
+
+      <!-- Point to Point section -->
+      <div class="card-title" style="margin-top:16px;">Point to Point</div>
+      <div class="p2p-row">
+        <button class="btn p2p-step" data-delta="-3">-3</button>
+        <button class="btn p2p-step" data-delta="-1">-1</button>
+        <input type="number" id="p2p-hole" value="0" class="p2p-current">
+        <button class="btn p2p-step" data-delta="1">+1</button>
+        <button class="btn p2p-step" data-delta="3">+3</button>
+      </div>
+      <div class="flex gap-2 mt-2" style="justify-content:flex-end;">
+        <span class="text-muted">Index</span>
+        <button class="btn btn-primary mt-2 w-full" id="btn-p2p-go">GO</button>
+      </div>
+
+    </div><!-- /#auto-panel -->
+
+    <!-- ── MANUAL tab ──────────────────────────────────────────────────────── -->
+    <div id="manual-panel" class="tab-panel">
+
+      <div class="card-title" style="margin-top:4px;">Gripper</div>
+      <div class="gripper-grid">
+        <button class="btn" id="btn-up">UP</button>
+        <button class="btn" id="btn-down">DOWN</button>
+        <button class="btn" id="btn-open">OPEN</button>
+        <button class="btn btn-active" id="btn-close">CLOSE</button>
+        <button class="btn" id="btn-pick">PICK</button>
+        <button class="btn" id="btn-place">PLACE</button>
+      </div>
+
+      <div class="card-title mt-3">Jog</div>
+      <div class="jog-row">
+        <div>
+          <button class="btn" id="btn-jog-ccw">↺</button>
+          <div class="jog-label">CCW</div>
+        </div>
+        <div>
+          <input type="number" id="jog-deg" class="jog-deg-input" value="10" min="1" max="180">
+          <div class="jog-label">Degree</div>
+        </div>
+        <div>
+          <button class="btn" id="btn-jog-cw">↻</button>
+          <div class="jog-label">CW</div>
+        </div>
+      </div>
+
+      <!-- Tuning sliders -->
+      <div class="card-title mt-3">Tuning</div>
+      <div id="tuning-panel">
+        <!-- Filled by ControlsView._bindTuning() -->
+      </div>
+      <button class="btn btn-primary w-full mt-2" id="btn-apply-gains">Apply Gains</button>
+
+    </div><!-- /#manual-panel -->
+
+    <!-- ── TEST MODE tab ───────────────────────────────────────────────────── -->
+    <div id="test-panel" class="tab-panel hidden">
+      <p class="text-muted" style="text-align:center; margin-top:24px;">
+        Test mode — send via BaseSystem v1.1
+      </p>
+    </div>
+
+  </div><!-- /right column -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════════
+       BOTTOM BAR — STOP + HEARTBEAT
+       ══════════════════════════════════════════════════════════════════════════ -->
+  <div class="bottom-bar">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span style="font-size:18px;">🤖</span>
+      <span style="font-weight:700; font-size:13px;">1-DOF Robot</span>
+    </div>
+    <button class="btn btn-stop" id="btn-stop" style="width:auto; margin:0; padding:8px 24px;">
+      STOP
+    </button>
+    <div class="heartbeat-row">
+      Heartbeat: <span id="stat-heartbeat">—</span>
+    </div>
+  </div>
+
+</div><!-- /.app-layout -->
+
+<!-- ── ES Module entry point ────────────────────────────────────────────────── -->
+<script type="module" src="app.js"></script>
+</body>
+</html>
