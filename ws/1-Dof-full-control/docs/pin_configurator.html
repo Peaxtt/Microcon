@@ -921,7 +921,7 @@ async function ltConnect() {
   if(!('serial' in navigator)) { alert('Web Serial ต้องใช้ Chrome หรือ Edge'); return; }
   try {
     ltPort=await navigator.serial.requestPort();
-    await ltPort.open({baudRate:230400,dataBits:8,parity:'even',stopBits:1});
+    await ltPort.open({baudRate:19200,dataBits:8,parity:'even',stopBits:1});
   } catch(e) { ltLog('er','Open: '+e.message); ltPort=null; return; }
   ltRunning=true; setUI(true);
   ltLog('ii','Port opened — detecting mode...');

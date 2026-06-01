@@ -37,5 +37,8 @@
       "Bash(Remove-Item *)",
       "PowerShell(\\(Get-Content \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\docs\\\\pin_configurator.html\" | Measure-Object -Line\\).Lines)"
     ]
+  },
+  "enabledPlugins": {
+    "impeccable@impeccable": true
   }
 }

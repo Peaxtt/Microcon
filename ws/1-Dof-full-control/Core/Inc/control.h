@@ -1,62 +1,44 @@
 #ifndef __CONTROL_H
 #define __CONTROL_H
 
-/*
- * control.h — Control Layer Interface
- * =====================================
- * Declares the API that the control module must implement.
- * This header is owned by the firmware team.
- * The control team provides control.c (PID + trajectory).
- *
- * ── Model selection ──────────────────────────────────────────────────────
- * The control module selects the appropriate model automatically:
- *   |target - current| < control_model_switch_deg  →  control_model[0]  (fine)
- *   |target - current| ≥ control_model_switch_deg  →  control_model[1]  (coarse)
- *
- * Both models are configured in robot.h as control_model[CONTROL_MODEL_COUNT].
- * Set via Live Expressions or Modbus registers 0x0C–0x0F, 0x38–0x3F.
- *
- * ── Default behaviour when control.c is not linked ───────────────────────
- * All functions are __weak. Defaults:
- *   control_update()     → *pwm_out = 0.0f  (motor off)
- *   control_is_settled() → returns 1         (FSM can still transition)
- *
- * ── Integration ───────────────────────────────────────────────────────────
- *   main.c USER CODE 2 : control_init()
- *   ISR (1kHz)         : control_update(pos, vel, &pwm)
- *   state_machine.c    : control_set_target(), control_reset(), control_is_settled()
- */
+#include "main.h"
+#include <stdint.h>
 
-#include "robot.h"
+/* ── Control model (PID gains + trajectory params) ───────────────────────── */
+typedef struct {
+  float kp_vel, ki_vel, kd_vel;   /* velocity PID */
+  float kp_pos, ki_pos, kd_pos;   /* position PID */
+  float v_max, a_max, j_max;      /* trajectory (rad/s, rad/s², rad/s³) */
+  uint8_t traj_type;              /* 0=trapezoid  1=s-curve  2=direct */
+} ControlModel_t;
 
-/* ── Lifecycle ────────────────────────────────────────────────────────────── */
+#define CONTROL_MODEL_COUNT  2
 
-/* Called once at startup, after encoder is initialised. */
+/* ── Globals provided by main.c (consumed by control.c) ─────────────────── */
+extern ControlModel_t     control_model[CONTROL_MODEL_COUNT];
+extern volatile float     control_model_switch_deg;
+extern volatile float     robot_pos_rad;     /* updated every 1kHz tick */
+extern volatile uint8_t   sys_ff_enabled;    /* 1 = reference feedforward on */
+extern volatile float     sys_V_supply;      /* motor bus voltage (V) */
+
+/* ── Observables written by control.c (read via Live Expressions) ────────── */
+extern volatile float    ctrl_pos_err;
+extern volatile float    ctrl_vel_sp;
+extern volatile float    ctrl_vel_err;
+extern volatile float    ctrl_pwm_out;
+extern volatile float    ctrl_ff_pwm;
+extern volatile float    ctrl_ideal_pos;
+extern volatile float    ctrl_ideal_vel;
+extern volatile uint8_t  ctrl_settled;
+extern volatile uint8_t  ctrl_model_idx;
+extern volatile float    ctrl_pos_deadband_deg;
+extern volatile float    ctrl_vel_deadband;
+
+/* ── Interface ───────────────────────────────────────────────────────────── */
 void    control_init(void);
-
-/* Called when entering a motion state (AUTO, SEQUENCE, TEST, MANUAL_SWITCH).
- * Clears integrators, resets trajectory. */
 void    control_reset(void);
-
-/* ── Per-move ─────────────────────────────────────────────────────────────── */
-
-/* Arm a new move to target_rad. Called from state_machine_tick (100 Hz).
- * Selects model based on |target - current| vs control_model_switch_deg. */
 void    control_set_target(float target_rad);
-
-/* ── Per-tick (1 kHz ISR) ─────────────────────────────────────────────────── */
-
-/* One control cycle.
- *   pos_rad    — current encoder position (rad)
- *   vel_rad_s  — filtered encoder velocity (rad/s)
- *   pwm_out    — write commanded PWM fraction here  (-1.0 .. +1.0)
- */
 void    control_update(float pos_rad, float vel_rad_s, float *pwm_out);
-
-/* ── Status ───────────────────────────────────────────────────────────────── */
-
-/* Returns 1 when the move is complete (trajectory done + position settled).
- * Called from state_machine_tick to advance sequence steps. */
 uint8_t control_is_settled(float pos_rad);
 
 #endif /* __CONTROL_H */
