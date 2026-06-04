@@ -1393,6 +1393,7 @@ int main(void)
           if (!dev_dash.Cmd.start_move)
             dev_dash.Cmd.target_deg = pos_now * (180.0f / 3.14159f);
           control_reset();
+          mb_slave.registers[0x05] = 0;
         }
         prev_state = current_state;
 
@@ -1475,7 +1476,7 @@ int main(void)
             }
             mb_slave.registers[0x01] = 0;
           } else if (mode_cmd & 0x04) {  // AUTO — requires homed
-            if (homed) { skip_p2p_entry = 1; current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
+            if (homed) { skip_p2p_entry = 0; current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
             mb_slave.registers[0x01] = 0;
           } else if (mode_cmd & 0x08) {  // SET HOME
             dev_dash.Cmd.set_home = 1;
@@ -1689,7 +1690,7 @@ int main(void)
             {
               int16_t p2p_raw  = (int16_t)mb_slave.registers[0x24];
               static int16_t last_p2p_raw = -32768;
-              /* reg[0x23] doubles as homed flag — read unit before firmware overwrites it */
+              if (entering_pid_state) last_p2p_raw = -32768; /* reset on entry so P2P triggers */
               if (skip_p2p_entry) {
                 last_p2p_raw   = p2p_raw;
                 skip_p2p_entry = 0;

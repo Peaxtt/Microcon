@@ -35,7 +35,16 @@
       "Bash(Measure-Object -Line)",
       "PowerShell(\\(Get-Content \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\docs\\\\pin_configurator.html\"\\).Count; \\(Get-Content \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\docs\\\\pinmap.html\"\\).Count)",
       "Bash(Remove-Item *)",
-      "PowerShell(\\(Get-Content \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\docs\\\\pin_configurator.html\" | Measure-Object -Line\\).Lines)"
+      "PowerShell(\\(Get-Content \"C:\\\\PaYae\\\\Microcon\\\\ws\\\\1-Dof-full-control\\\\docs\\\\pin_configurator.html\" | Measure-Object -Line\\).Lines)",
+      "Bash(node *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(mkdir -p .impeccable/critique)",
+      "Bash(mktemp /tmp/critique_body_XXXXXX.md)",
+      "Bash(cat)",
+      "Bash(echo \"Body written. Exit: $?\")",
+      "Bash(IMPECCABLE_CRITIQUE_META='{\"target\":\"python_gui/sim_gui/index.html\",\"total_score\":22,\"p0_count\":0,\"p1_count\":2}' node \"C:\\\\Users\\\\Predator\\\\.claude\\\\plugins\\\\cache\\\\impeccable\\\\impeccable\\\\3.5.0\\\\skills\\\\impeccable\\\\scripts\\\\critique-storage.mjs\" write \"python-gui-sim-gui-index-html\" /tmp/critique_body_rfVkHq.md)",
+      "Bash(rm /tmp/critique_body_rfVkHq.md)",
+      "Bash(echo \"Cleaned: $?\")"
     ]
   },
   "enabledPlugins": {
