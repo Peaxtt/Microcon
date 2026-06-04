@@ -221,7 +221,7 @@ volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST 
 volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
-volatile float   homing_slow_speed     = 0.15f; // PWM fraction for HOMING_SLOW (tunable live)
+volatile float   homing_slow_speed     = 0.09f; // PWM fraction for HOMING_SLOW (tunable live)
 /* Set 1 inside finish_homing() when proximity offset move is in progress.
    STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
 volatile uint8_t homing_final_zero_pending = 0;
@@ -525,6 +525,8 @@ PUTCHAR_PROTOTYPE { return ch; }
 static void eeprom_save(float angle_deg) { (void)angle_deg; /* TODO: Flash write */ }
 static float eeprom_load(void)           { return 0.0f;     /* TODO: Flash read  */ }
 
+static void start_move_deg(float deg);  /* forward declaration */
+
 // ── Enable HOME_SENSOR EXTI — PC3, RISING edge, PULLUP ───────────────────
 // Normal: NPN sinks → LOW(0). Blade detected: NPN off → PULLUP → HIGH(1).
 static void homing_exti_enable(void) {
@@ -555,7 +557,6 @@ static void homing_exti_disable(void) {
 static void finish_homing(void) {
   homing_exti_disable();
   homing_sensor_flag = 0;
-  /* Zero encoder at sensor position */
   __disable_irq();
   enc_reset_pending    = 1;
   cumulative_angle_deg = 0.0f;
@@ -568,7 +569,14 @@ static void finish_homing(void) {
   eeprom_save(0.0f);
   mb_slave.registers[0x27] = 0;
 
-  current_state = STATE_IDLE;
+  if (home_offset_deg != 0.0f) {
+    homing_final_zero_pending = 1;
+    skip_p2p_entry = 1;
+    current_state  = STATE_AUTO;
+    start_move_deg(home_offset_deg);
+  } else {
+    current_state = STATE_IDLE;
+  }
 }
 
 // Start a trajectory move to target_deg (degrees). Delegates to control_set_target().
@@ -1017,7 +1025,7 @@ int main(void)
       }
 
       // 3. Update Status Registers (BaseSystem v1.1)
-      mb_slave.registers[0x2F] = (uint16_t)current_state; /* state enum for GUI/BaseSystem */
+      mb_slave.registers[0x2F] = (uint16_t)current_state;
       mb_slave.registers[0x23] = (uint16_t)homed;
       mb_slave.registers[0x26] = (reed_up   ? 1 : 0) |
                                  (reed_down ? 2 : 0) |
@@ -1142,21 +1150,9 @@ int main(void)
           dev_dash.Cmd.set_home = 1;
         }
         if (dev_dash.Cmd.set_home) {
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
           dev_dash.Cmd.set_home = 0;
-          __disable_irq();
-          enc_reset_pending        = 1;
-          cumulative_angle_deg     = 0.0f;
-          ctrl_traj_start          = 0.0f;
-          ctrl_direct_target       = 0.0f;
-          motor_speed_cmd          = 0.0f;
-          dev_dash.Cmd.target_deg  = 0.0f;
-          dev_dash.Cmd.start_move  = 0;
-          vel_filtered             = 0.0f;
-          __enable_irq();
-          control_reset();
-          control_set_target(0.0f);
-          homed           = 1;
+          /* Mark current position as home — store offset, no encoder reset, no movement */
+          home_offset_deg = cumulative_angle_deg;
           sethome_led_cnt = 1;
         }
       }
@@ -1691,21 +1687,18 @@ int main(void)
 
             mb_slave.registers[0x27] = 0x08;
             {
-              static float last_mb_target = -99999.0f;
-              /* P2P hole index: negative = right-side hole → (72+N), then add proximity offset */
               int16_t p2p_raw  = (int16_t)mb_slave.registers[0x24];
-              int16_t p2p_hole = (p2p_raw >= 0) ? p2p_raw : (int16_t)(72 + p2p_raw);
-              float mb_target_deg = (float)p2p_hole * 5.0f + home_proximity_offset_deg;
+              static int16_t last_p2p_raw = -32768;
+              /* reg[0x23] doubles as homed flag — read unit before firmware overwrites it */
               if (skip_p2p_entry) {
-                // Entered from jog/mode cmd — sync last target without moving
-                last_mb_target  = mb_target_deg;
-                skip_p2p_entry  = 0;
+                last_p2p_raw   = p2p_raw;
+                skip_p2p_entry = 0;
               } else if (dev_dash.Cmd.start_move) {
                 dev_dash.Cmd.start_move = 0;
                 start_move_deg(dev_dash.Cmd.target_deg);
-              } else if (mb_target_deg != last_mb_target) {
-                last_mb_target = mb_target_deg;
-                start_move_deg(mb_target_deg);
+              } else if (p2p_raw != last_p2p_raw) {
+                last_p2p_raw = p2p_raw;
+                start_move_deg((float)p2p_raw);
               }
             }
             if (traj_done) mb_slave.registers[0x27] = 0;
