@@ -9,6 +9,15 @@
  * Emits events via EventTarget so controllers can listen without tight coupling.
  */
 
+// Actuator button ids and their "active" condition based on reed state
+// Each button highlights independently based on its own reed signal only
+const ACTUATOR_BUTTONS = [
+  { id: "btn-up",    active: (s) => s.reed_up   },   // cylinder UP reed
+  { id: "btn-down",  active: (s) => s.reed_down },   // cylinder DOWN reed
+  { id: "btn-close", active: (s) =>  s.reed_grip },  // gripper CLOSED reed
+  { id: "btn-open",  active: (s) => !s.reed_grip },  // gripper OPEN = no grip reed
+];
+
 export class ControlsView extends EventTarget {
   constructor() {
     super();
@@ -16,7 +25,8 @@ export class ControlsView extends EventTarget {
       kp_vel: 10.0, ki_vel: 0.01, kd_vel: 0.0,
       kp_pos:  2.0, kd_pos:  0.2, ki_pos: 0.7,
       v_max:   3.0, a_max:  12.56,
-      max_speed: 0.4,
+      max_speed:    0.4,
+      seq_dwell_ms: 200,   // matches firmware default
     };
     this._pairs = [];     // [{pick, place, pickDeg, placeDeg}]
     this._nTarget = 3;
@@ -100,7 +110,9 @@ export class ControlsView extends EventTarget {
 
     // Random shuffle button
     document.getElementById("btn-random")?.addEventListener("click", () => {
-      emit("randomize", { n: this._nTarget });
+      const tDeg = parseFloat(document.getElementById("target-deg")?.value) || 500;
+      const vDeg = parseFloat(document.getElementById("var-deg")?.value) || 45;
+      emit("randomize", { n: this._nTarget, targetDeg: tDeg, varDeg: vDeg });
     });
 
     // Preview path button
@@ -142,13 +154,15 @@ export class ControlsView extends EventTarget {
   // ── Tuning panel ───────────────────────────────────────────────────────────
   _bindTuning() {
     const PARAM_DEFS = [
-      { id: "kp_vel",    min: 0, max: 30,   step: 0.1,  label: "kp_vel" },
-      { id: "ki_vel",    min: 0, max: 2,    step: 0.001,label: "ki_vel" },
-      { id: "kp_pos",    min: 0, max: 10,   step: 0.1,  label: "kp_pos" },
-      { id: "kd_pos",    min: 0, max: 2,    step: 0.01, label: "kd_pos" },
-      { id: "v_max",     min: 0.5, max:15,  step: 0.1,  label: "v_max (rad/s)" },
-      { id: "a_max",     min: 1, max: 80,   step: 0.5,  label: "a_max (rad/s²)" },
-      { id: "max_speed", min: 0.1, max:1,   step: 0.01, label: "max_speed" },
+      { id: "kp_vel",       min: 0,   max: 30,   step: 0.1,   label: "kp_vel" },
+      { id: "ki_vel",       min: 0,   max: 2,    step: 0.001, label: "ki_vel" },
+      { id: "kp_pos",       min: 0,   max: 10,   step: 0.1,   label: "kp_pos" },
+      { id: "kd_pos",       min: 0,   max: 2,    step: 0.01,  label: "kd_pos" },
+      { id: "v_max",        min: 0.5, max: 15,   step: 0.1,   label: "v_max (rad/s)" },
+      { id: "a_max",        min: 1,   max: 80,   step: 0.5,   label: "a_max (rad/s²)" },
+      { id: "max_speed",    min: 0.1, max: 1,    step: 0.01,  label: "max_speed" },
+      // seq_dwell_ms: shared between sim reed delay and board register
+      { id: "seq_dwell_ms", min: 50,  max: 3000, step: 50,    label: "seq_dwell (ms)" },
     ];
 
     const container = document.getElementById("tuning-panel");
@@ -190,6 +204,23 @@ export class ControlsView extends EventTarget {
   renderPairs(pairs) {
     this._pairs = pairs;
     this._renderPairTable();
+  }
+
+  /**
+   * Update actuator button highlight colors from robot state.
+   * Called by EventController on every robot state update.
+   * @param {import('../model/robot.js').RobotState} state
+   */
+  updateActuatorState(state) {
+    for (const { id, active } of ACTUATOR_BUTTONS) {
+      const btn = document.getElementById(id);
+      if (!btn) continue;
+      if (active(state)) {
+        btn.classList.add("btn-active");
+      } else {
+        btn.classList.remove("btn-active");
+      }
+    }
   }
 
   _renderPairTable() {

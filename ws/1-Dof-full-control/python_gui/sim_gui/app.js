@@ -19,6 +19,7 @@ import { SimulatorModel } from './model/simulator.js';
 
 // ── View imports ───────────────────────────────────────────────────────────────
 import { DiskView }     from './view/disk.js';
+import { GripperView } from './view/gripper.js';
 import { GraphView }    from './view/graphs.js';
 import { StatsView }    from './view/stats.js';
 import { ControlsView } from './view/controls.js';
@@ -36,7 +37,8 @@ function main() {
   const sim      = new SimulatorModel();
 
   // ── 2. Views ───────────────────────────────────────────────────────────────
-  const disk = new DiskView("disk-container");
+  const disk    = new DiskView("disk-container");
+  const gripper = new GripperView("gripper-container");
 
   const graphs = new GraphView("graph-canvas");
 
@@ -56,7 +58,8 @@ function main() {
   robot.subscribe((state) => {
     stats.update(state);
     graphs.update(state);
-    // disk.setAngle is handled by EventController to avoid duplication
+    gripper.update(state);
+    // disk.setAngle handled by EventController
   });
 
   // ── 4. Controllers ─────────────────────────────────────────────────────────

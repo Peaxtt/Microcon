@@ -40,17 +40,21 @@ export class EventController {
 
     // Any generic Modbus command (gripper, jog, home, p2p, gains, etc.)
     cv.addEventListener("cmd", (e) => {
-      this._ws.sendCmd(e.detail);
-      // Track setpoint for graphs when a move is commanded
+      // Attach selected hole index when triggering SET HOME from the disk
+      const cmd = (e.detail.type === "set_home" && this._disk.selectedHole !== null)
+        ? { ...e.detail, hole: this._disk.selectedHole }
+        : e.detail;
+      this._ws.sendCmd(cmd);
+      // Track setpoint for graphs when a move is commanded.
+      // hole is signed (sign = direction); absolute disk position = |hole| × 5°.
       if (e.detail.type === "p2p" && e.detail.hole !== undefined) {
-        const deg = e.detail.hole * 5;
-        this._robot.setSetpoint(deg);
+        this._robot.setSetpoint(Math.abs(e.detail.hole) * 5);
       }
     });
 
     // Random pair generation
     cv.addEventListener("randomize", (e) => {
-      const pairs = this._seq.generateRandom(e.detail.n, 180, 90);
+      const pairs = this._seq.generateRandom(e.detail.n, e.detail.targetDeg, e.detail.varDeg);
       this._controls.renderPairs(pairs);
     });
 
@@ -98,7 +102,7 @@ export class EventController {
 
     // User edited pair table manually
     cv.addEventListener("pairsEdited", (e) => {
-      this._seq.setFromDeg(e.detail.map(p => [p.pickDeg || 0, p.placeDeg || 0]));
+      this._seq.setFromRaw(e.detail.map(p => [p.pick || 0, p.place || 0]));
     });
   }
 
@@ -114,9 +118,9 @@ export class EventController {
   // ── RobotState updates → view cascade ─────────────────────────────────────
 
   _bindRobotModel() {
-    // Robot state drives disk arm angle
     this._robot.subscribe((state) => {
       this._disk.setAngle(state.pos_deg);
+      this._controls.updateActuatorState(state);   // button colors follow reed state
     });
   }
 

@@ -37,9 +37,18 @@ export class StatsView {
    * @param {import('../model/robot.js').RobotState} state
    */
   update(state) {
-    this._set("pos",       `${state.pos_deg.toFixed(1)}`);
-    this._set("speed",     `${(state.vel_dps * Math.PI / 180).toFixed(2)}`);
-    this._set("accel",     `${(state.accel_dps2 * Math.PI / 180).toFixed(2)}`);
+    this._set("pos",   `${state.pos_deg.toFixed(1)}`);
+    this._set("speed", `${(state.vel_dps * Math.PI / 180).toFixed(2)}`);
+    this._set("accel", `${(state.accel_dps2 * Math.PI / 180).toFixed(2)}`);
+
+    // Orange only when robot is actively moving or in a motion state
+    const motionStates = ["AUTO","SEQUENCE","HOMING_FAST","HOMING_BACKOFF","HOMING_SLOW","MANUAL","MANUAL_MB"];
+    const stateName    = state.state_name.replace("(sim)", "").trim();
+    const isMoving     = Math.abs(state.vel_dps) > 0.5;
+    const isActive     = motionStates.includes(stateName) || isMoving;
+    this._el.pos  ?.classList.toggle("is-active", isActive);
+    this._el.speed?.classList.toggle("is-active", isMoving);
+    this._el.accel?.classList.toggle("is-active", Math.abs(state.accel_dps2) > 1);
 
     // Gripper status from reed switches
     const gripStr = state.reed_grip  ? "Closed"
@@ -49,7 +58,6 @@ export class StatsView {
     this._set("gripper", gripStr);
 
     // Mode / state
-    const stateName = state.state_name.replace("(sim)", "").trim();
     this._set("mode", stateName);
     if (this._el.mode) {
       this._el.mode.style.color = STATE_COLORS[stateName] ?? STATE_COLORS.default;

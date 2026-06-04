@@ -125,11 +125,11 @@ volatile float vel_filtered = 0.0f;      // IIR-filtered velocity (used by PID)
 volatile float robot_pos_rad = 0.0f;          /* updated 1kHz, used by control.c */
 ControlModel_t control_model[CONTROL_MODEL_COUNT] = {
   { .kp_vel=10.0f, .ki_vel=0.01f, .kd_vel=0.0f,
-    .kp_pos=2.0f,  .ki_pos=0.7f,  .kd_pos=0.2f,
-    .v_max=3.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
+    .kp_pos=2.0f,  .ki_pos=0.5f,  .kd_pos=0.15f,
+    .v_max=4.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
   { .kp_vel=10.0f, .ki_vel=0.01f, .kd_vel=0.0f,
-    .kp_pos=2.0f,  .ki_pos=0.7f,  .kd_pos=0.2f,
-    .v_max=3.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
+    .kp_pos=2.0f,  .ki_pos=0.5f,  .kd_pos=0.15f,
+    .v_max=4.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
 };
 volatile float   control_model_switch_deg = 9999.0f; /* always use model[0] */
 volatile uint8_t sys_ff_enabled           = 1;
@@ -142,6 +142,7 @@ volatile float ff_gain      = 0.0f;      // acceleration feedforward [%/(rad/s²
 volatile float seq_delay_s     = 0.5f;   // legacy — keep for python_gui compat
 volatile float seq_dwell_ms    = 200.0f; // min wait before accepting reed switch
 volatile float seq_timeout_ms  = 3000.0f;// force-advance if no reed within this time
+volatile float seq_settle_ms   = 300.0f; // wait after ctrl_settled before cylinder DOWN
 
 volatile int8_t soft_limit_dir = 0;      // 0=none +1=pos end -1=neg end (ISR writes, main reads)
 
@@ -220,7 +221,7 @@ volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST 
 volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
-volatile float   homing_slow_speed     = 0.06f; // PWM fraction for HOMING_SLOW (tunable live)
+volatile float   homing_slow_speed     = 0.15f; // PWM fraction for HOMING_SLOW (tunable live)
 /* Set 1 inside finish_homing() when proximity offset move is in progress.
    STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
 volatile uint8_t homing_final_zero_pending = 0;
@@ -467,13 +468,13 @@ DevDashboard_t dev_dash = {
   .Ctrl.control_mode    = 3,
   .Ctrl.traj_type       = 0,
   .Ctrl.pid_enabled     = 1,
-  .Ctrl.max_velocity    = 3.0f,
+  .Ctrl.max_velocity    = 4.0f,
   .Ctrl.max_accel       = 12.56f,
   .Ctrl.max_jerk        = 10.0f,
   .Ctrl.kp_position     = 2.0f,
-  .Ctrl.ki_pos          = 0.7f,
-  .Ctrl.kd_pos          = 0.2f,
-  .Ctrl.pos_deadband_deg = 2.0f,
+  .Ctrl.ki_pos          = 0.5f,
+  .Ctrl.kd_pos          = 0.15f,
+  .Ctrl.pos_deadband_deg = 0.35f,
   .Ctrl.vel_deadband     = 1.0f,
   .Ctrl.kp_vel          = 10.0f,
   .Ctrl.ki_vel          = 0.01f,
@@ -567,25 +568,31 @@ static void finish_homing(void) {
   eeprom_save(0.0f);
   mb_slave.registers[0x27] = 0;
 
-  if (home_proximity_offset_deg != 0.0f) {
-    /* Move to calibrated hole-0 position, then re-zero encoder there.
-       homing_final_zero_pending is checked in STATE_AUTO once ctrl_settled. */
-    homing_final_zero_pending = 1;
-    skip_p2p_entry = 1;
-    current_state  = STATE_AUTO;
-    start_move_deg(home_proximity_offset_deg);
-  } else {
-    current_state = STATE_IDLE;
-  }
+  current_state = STATE_IDLE;
 }
 
 // Start a trajectory move to target_deg (degrees). Delegates to control_set_target().
 static void start_move_deg(float deg)
 {
   float target_rad   = deg * (3.14159265f / 180.0f);
-  ctrl_direct_target = target_rad;   /* keep for legacy traj_done reference */
+  ctrl_direct_target = target_rad;
   ctrl_traj_start    = my_encoder.position_rad;
   control_set_target(target_rad);
+}
+
+static void start_move_hole(int16_t raw)
+{
+  int16_t hole      = (raw >= 0) ? raw : (int16_t)(-raw);
+  float   target_abs= (float)hole * 5.0f;
+  float pos_cumul = my_encoder.position_rad * (180.0f / 3.14159265f);
+  float pos_mod   = fmodf(pos_cumul, 360.0f);
+  if (pos_mod < 0.0f) pos_mod += 360.0f;
+  float disp;
+  if (raw >= 0)
+    disp =  fmodf((target_abs - pos_mod) + 360.0f, 360.0f);
+  else
+    disp = -fmodf((pos_mod - target_abs) + 360.0f, 360.0f);
+  start_move_deg(pos_cumul + disp);
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
@@ -917,6 +924,7 @@ int main(void)
         
         // Force the State Machine to AUTO so it actually executes the move!
         if (current_state != STATE_EMER) {
+            skip_p2p_entry = 1;
             current_state = STATE_AUTO;
         }
         
@@ -978,7 +986,7 @@ int main(void)
           C->start_move = 0;
           dev_dash.Cmd.target_deg = C->traj_target_deg;
           dev_dash.Cmd.start_move = 1;
-          if (current_state != STATE_EMER) current_state = STATE_AUTO;
+          if (current_state != STATE_EMER) { skip_p2p_entry = 1; current_state = STATE_AUTO; }
         }
         if (C->reset_all) {
           C->reset_all = 0;
@@ -1135,9 +1143,10 @@ int main(void)
         }
         if (dev_dash.Cmd.set_home) {
           __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
+          dev_dash.Cmd.set_home = 0;
           __disable_irq();
-          dev_dash.Cmd.set_home    = 0;
           enc_reset_pending        = 1;
+          cumulative_angle_deg     = 0.0f;
           ctrl_traj_start          = 0.0f;
           ctrl_direct_target       = 0.0f;
           motor_speed_cmd          = 0.0f;
@@ -1146,10 +1155,9 @@ int main(void)
           vel_filtered             = 0.0f;
           __enable_irq();
           control_reset();
-          home_offset_deg      = cumulative_angle_deg;
-          homed                = 1;
-          cumulative_angle_deg = 0.0f;
-          sethome_led_cnt      = 1;
+          control_set_target(0.0f);
+          homed           = 1;
+          sethome_led_cnt = 1;
         }
       }
 
@@ -1413,7 +1421,8 @@ int main(void)
               current_state == STATE_MANUAL_MB || current_state == STATE_AUTO) {
             dev_dash.Cmd.target_deg = 0.0f;
             dev_dash.Cmd.start_move = 1;
-            current_state = STATE_AUTO; // สลับมา AUTO ถ้ายังไม่ได้อยู่
+            skip_p2p_entry = 1;
+            current_state = STATE_AUTO;
           }
         }
 
@@ -1747,23 +1756,18 @@ int main(void)
                 break;
 
               case SEQ_MB_GOING_PICK: {
-                /* Hole index conversion:
-                   positive = absolute left-side hole (×5 → degrees)
-                   negative = go |N| holes RIGHT from home → (72+N) × 5 */
                 mb_slave.registers[0x27] = 0x02;
-                int16_t pick_raw  = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2];
-                int16_t pick_hole = (pick_raw >= 0) ? pick_raw : (int16_t)(72 + pick_raw);
-                float pick_deg = (float)pick_hole * 5.0f + home_proximity_offset_deg;
+                int16_t pick_raw = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2];
                 if (seq_mb_timer == 0) {
-                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET); /* open pre-move */
-                  start_move_deg(pick_deg);
+                  HAL_GPIO_WritePin(GRIPPER_GPIO_Port, GRIPPER_Pin, GPIO_PIN_RESET);
+                  start_move_hole(pick_raw);
                   seq_mb_timer = 1;
-                  break;  /* don't check ctrl_settled this same tick */
+                  break;
                 }
-                if (ctrl_settled) {
-                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); /* cylinder DOWN */
-                  seq_mb_timer = 0;
-                  seq_mb_step  = 0;
+                if (ctrl_settled) seq_mb_timer++;
+                if (ctrl_settled && seq_mb_timer >= (uint32_t)(seq_settle_ms / 10.0f + 0.5f)) {
+                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
+                  seq_mb_timer = 0; seq_mb_step = 0;
                   seq_mb_state = SEQ_MB_PICKING;
                 }
                 break;
@@ -1797,24 +1801,17 @@ int main(void)
                 break;
 
               case SEQ_MB_GOING_PLACE: {
-                /* Place hole: negative = go |N| holes RIGHT from PICK position
-                   e.g. pick=16, place=-69 → 16+(72-69)=19 → 95° */
                 mb_slave.registers[0x27] = 0x04;
-                int16_t pick_raw2   = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2];
-                int16_t pick_hole2  = (pick_raw2 >= 0) ? pick_raw2 : (int16_t)(72 + pick_raw2);
-                int16_t place_raw   = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2 + 1];
-                int16_t place_hole  = (place_raw >= 0) ? place_raw
-                                                       : (int16_t)(pick_hole2 + 72 + place_raw);
-                float place_deg = (float)place_hole * 5.0f + home_proximity_offset_deg;
+                int16_t place_raw = (int16_t)mb_slave.registers[0x12 + seq_mb_pair_idx * 2 + 1];
                 if (seq_mb_timer == 0) {
-                  start_move_deg(place_deg);
+                  start_move_hole(place_raw);
                   seq_mb_timer = 1;
                   break;
                 }
-                if (ctrl_settled) {
-                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET); /* cylinder DOWN */
-                  seq_mb_timer = 0;
-                  seq_mb_step  = 0;
+                if (ctrl_settled) seq_mb_timer++;
+                if (ctrl_settled && seq_mb_timer >= (uint32_t)(seq_settle_ms / 10.0f + 0.5f)) {
+                  HAL_GPIO_WritePin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin, GPIO_PIN_SET);
+                  seq_mb_timer = 0; seq_mb_step = 0;
                   seq_mb_state = SEQ_MB_PLACING;
                 }
                 break;
@@ -1846,7 +1843,9 @@ int main(void)
                         seq_mb_state = SEQ_MB_IDLE;
                         mb_slave.registers[0x22] = 0;
                         mb_slave.registers[0x27] = 0;
-                        current_state = STATE_IDLE;
+                        start_move_hole(0);
+                        skip_p2p_entry = 1;
+                        current_state = STATE_AUTO;
                       } else {
                         seq_mb_state = SEQ_MB_GOING_PICK;
                       }

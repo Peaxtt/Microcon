@@ -79,12 +79,12 @@ void Error_Handler(void);
 #define LPUART1_TX_GPIO_Port GPIOA
 #define LPUART1_RX_Pin GPIO_PIN_3
 #define LPUART1_RX_GPIO_Port GPIOA
-#define REED_DOWN_Pin GPIO_PIN_4
-#define REED_DOWN_GPIO_Port GPIOA
+#define REED_UP_Pin GPIO_PIN_4
+#define REED_UP_GPIO_Port GPIOA
 #define LD2_Pin GPIO_PIN_5
 #define LD2_GPIO_Port GPIOA
-#define REED_UP_Pin GPIO_PIN_7
-#define REED_UP_GPIO_Port GPIOA
+#define REED_DOWN_Pin GPIO_PIN_7
+#define REED_DOWN_GPIO_Port GPIOA
 #define REED_GRIP_Pin GPIO_PIN_0
 #define REED_GRIP_GPIO_Port GPIOB
 #define PNEUMATIC_Pin GPIO_PIN_1
