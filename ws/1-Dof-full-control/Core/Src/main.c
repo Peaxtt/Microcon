@@ -221,10 +221,14 @@ volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST 
 volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
+volatile uint8_t home_return_via_sensor = 1;    // 1=go via proximity sensor, 0=PID direct
 volatile float   homing_slow_speed     = 0.09f; // PWM fraction for HOMING_SLOW (tunable live)
 /* Set 1 inside finish_homing() when proximity offset move is in progress.
    STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
 volatile uint8_t homing_final_zero_pending = 0;
+volatile uint8_t homing_return_to_sethome  = 0; // 1 = after homing, drive to home_offset_deg
+volatile uint8_t homing_rezero_on_arrive   = 0; // 1 = re-zero encoder when settled at sethome
+static   uint32_t hfz_delay_cnt            = 0; // delay counter for post-homing move
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -569,11 +573,12 @@ static void finish_homing(void) {
   eeprom_save(0.0f);
   mb_slave.registers[0x27] = 0;
 
-  if (home_offset_deg != 0.0f) {
+  if (home_offset_deg != 0.0f && homing_return_to_sethome) {
+    homing_return_to_sethome  = 0;
     homing_final_zero_pending = 1;
-    skip_p2p_entry = 1;
-    current_state  = STATE_AUTO;
-    start_move_deg(home_offset_deg);
+    homing_rezero_on_arrive   = 1;
+    hfz_delay_cnt = 0;
+    current_state = STATE_IDLE; /* wait 1s in IDLE before moving */
   } else {
     current_state = STATE_IDLE;
   }
@@ -1386,13 +1391,14 @@ int main(void)
           (current_state == STATE_SEQUENCE && prev_state != STATE_SEQUENCE) ||
           (current_state == STATE_TEST     && prev_state != STATE_TEST)
         );
-        if (entering_pid_state) {
+        if (entering_pid_state && !homing_final_zero_pending) {
           float pos_now = current_position * RAD_PER_CNT;
           ctrl_direct_target = pos_now;
           ctrl_traj_start    = pos_now;
           if (!dev_dash.Cmd.start_move)
             dev_dash.Cmd.target_deg = pos_now * (180.0f / 3.14159f);
           control_reset();
+          control_set_target(pos_now);
           mb_slave.registers[0x05] = 0;
         }
         prev_state = current_state;
@@ -1402,14 +1408,56 @@ int main(void)
            When settled here, zero the encoder so hole-0 = 0° exactly.            */
         if (homing_final_zero_pending && ctrl_settled) {
           homing_final_zero_pending = 0;
-          __disable_irq();
-          enc_reset_pending    = 1;
-          cumulative_angle_deg = 0.0f;
-          ctrl_direct_target   = 0.0f;
-          ctrl_traj_start      = 0.0f;
-          __enable_irq();
-          control_reset();
+          if (homing_rezero_on_arrive) {
+            homing_rezero_on_arrive = 0;
+            __disable_irq();
+            enc_reset_pending    = 1;
+            cumulative_angle_deg = 0.0f;
+            ctrl_direct_target   = 0.0f;
+            ctrl_traj_start      = 0.0f;
+            __enable_irq();
+            control_reset();
+          }
           current_state = STATE_IDLE;
+        }
+
+        // ── LT+LB: HOME via proximity sensor (global) ────────────────────────────
+        if (joy_is_connected() && !emer_active) {
+          static uint8_t ltlb_prev_g = 0;
+          uint8_t ltlb_g = (joy_lt_f() > 0.5f && joy_btn(BTN_LB));
+          if (ltlb_g && !ltlb_prev_g &&
+              current_state != STATE_HOMING_FAST &&
+              current_state != STATE_HOMING_BACKOFF &&
+              current_state != STATE_HOMING_SLOW) {
+            motor_speed_cmd = 0.0f;
+            control_reset();
+            homing_exti_enable();
+            current_state = STATE_HOMING_FAST;
+          }
+          ltlb_prev_g = ltlb_g;
+        }
+
+        // ── GO HOME: LT + A → กลับ SET HOME position ────────────────────────────
+        if (joy_is_connected() && !emer_active) {
+          static uint8_t lta_prev_g = 0;
+          uint8_t lta_g = (joy_lt_f() > 0.5f && joy_btn(BTN_A));
+          if (lta_g && !lta_prev_g && homed &&
+              (current_state == STATE_IDLE || current_state == STATE_AUTO ||
+               current_state == STATE_MANUAL || current_state == STATE_MANUAL_MB)) {
+            if (home_return_via_sensor) {
+              motor_speed_cmd = 0.0f;
+              control_reset();
+              homing_return_to_sethome = 1;
+              homing_exti_enable();
+              current_state = STATE_HOMING_FAST;
+            } else {
+              homing_final_zero_pending = 1;
+              skip_p2p_entry = 1;
+              current_state  = STATE_AUTO;
+              start_move_deg(home_offset_deg);
+            }
+          }
+          lta_prev_g = lta_g;
         }
 
         // ── Go Home: LT + B → วิ่งกลับ 0° ทางที่ใกล้ที่สุดด้วย PID ───────────────
@@ -1428,7 +1476,8 @@ int main(void)
         // reg[0x05] jog — cumulative from current pos; BaseSystem +N=CCW encoder +CW → negate
         {
           int16_t jog_g = (int16_t)mb_slave.registers[0x05];
-          if (jog_g != 0 &&
+          if (entering_pid_state) mb_slave.registers[0x05] = 0; /* clear stale jog on state entry */
+          if (jog_g != 0 && !entering_pid_state &&
               current_state != STATE_EMER &&
               current_state != STATE_HOMING_FAST &&
               current_state != STATE_HOMING_BACKOFF &&
@@ -1513,6 +1562,17 @@ int main(void)
         switch (current_state) {
           case STATE_IDLE:
             mb_slave.registers[0x27] = 0;
+            /* After homing via LT+A: wait 1s then drive to SET HOME position */
+            if (homing_final_zero_pending) {
+              if (++hfz_delay_cnt >= 100) {
+                hfz_delay_cnt = 0;
+                homing_final_zero_pending = 0;
+                skip_p2p_entry = 1;
+                current_state  = STATE_AUTO;
+                start_move_deg(home_offset_deg);
+              }
+              break;
+            }
             if (joy_is_connected()) {
               if (joy_rt_f() > 0.5f) {
                 motor_speed_cmd = joy_ly_f();              // normal speed
@@ -1524,6 +1584,7 @@ int main(void)
                 motor_speed_cmd = 0.0f;
               }
               /* X=EMER handled globally above */
+              /* LT+LB = HOME (via proximity sensor always) */
               if (joy_lt_f() > 0.5f && joy_btn(BTN_LB)) { homing_exti_enable(); current_state = STATE_HOMING_FAST; }
               // T = enter P2P AUTO mode (requires homed)
               static uint8_t t_prev_idle = 0;
@@ -1690,7 +1751,7 @@ int main(void)
             {
               int16_t p2p_raw  = (int16_t)mb_slave.registers[0x24];
               static int16_t last_p2p_raw = -32768;
-              if (entering_pid_state) last_p2p_raw = -32768; /* reset on entry so P2P triggers */
+              if (entering_pid_state && !homing_final_zero_pending) last_p2p_raw = p2p_raw;
               if (skip_p2p_entry) {
                 last_p2p_raw   = p2p_raw;
                 skip_p2p_entry = 0;
