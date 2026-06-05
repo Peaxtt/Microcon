@@ -221,14 +221,11 @@ volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST 
 volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT after fast trigger
 volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
 volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
-volatile uint8_t home_return_via_sensor = 1;    // 1=go via proximity sensor, 0=PID direct
 volatile float   homing_slow_speed     = 0.09f; // PWM fraction for HOMING_SLOW (tunable live)
 /* Set 1 inside finish_homing() when proximity offset move is in progress.
    STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
 volatile uint8_t homing_final_zero_pending = 0;
-volatile uint8_t homing_return_to_sethome  = 0; // 1 = after homing, drive to home_offset_deg
-volatile uint8_t homing_rezero_on_arrive   = 0; // 1 = re-zero encoder when settled at sethome
-static   uint32_t hfz_delay_cnt            = 0; // delay counter for post-homing move
+volatile uint8_t homing_rezero_on_arrive   = 0; // 1 = re-zero encoder when settled at SET HOME
 
 // --- Live Expressions Dashboard & UI Testing ---
 typedef enum {
@@ -573,15 +570,7 @@ static void finish_homing(void) {
   eeprom_save(0.0f);
   mb_slave.registers[0x27] = 0;
 
-  if (home_offset_deg != 0.0f && homing_return_to_sethome) {
-    homing_return_to_sethome  = 0;
-    homing_final_zero_pending = 1;
-    homing_rezero_on_arrive   = 1;
-    hfz_delay_cnt = 0;
-    current_state = STATE_IDLE; /* wait 1s in IDLE before moving */
-  } else {
-    current_state = STATE_IDLE;
-  }
+  current_state = STATE_IDLE;
 }
 
 // Start a trajectory move to target_deg (degrees). Delegates to control_set_target().
@@ -1429,7 +1418,7 @@ int main(void)
               current_state != STATE_HOMING_FAST &&
               current_state != STATE_HOMING_BACKOFF &&
               current_state != STATE_HOMING_SLOW) {
-            motor_speed_cmd = 0.0f;
+            motor_speed_cmd          = 0.0f;
             control_reset();
             homing_exti_enable();
             current_state = STATE_HOMING_FAST;
@@ -1444,18 +1433,12 @@ int main(void)
           if (lta_g && !lta_prev_g && homed &&
               (current_state == STATE_IDLE || current_state == STATE_AUTO ||
                current_state == STATE_MANUAL || current_state == STATE_MANUAL_MB)) {
-            if (home_return_via_sensor) {
-              motor_speed_cmd = 0.0f;
-              control_reset();
-              homing_return_to_sethome = 1;
-              homing_exti_enable();
-              current_state = STATE_HOMING_FAST;
-            } else {
-              homing_final_zero_pending = 1;
-              skip_p2p_entry = 1;
-              current_state  = STATE_AUTO;
-              start_move_deg(home_offset_deg);
-            }
+            /* GO HOME: drive to SET HOME position, re-zero encoder on arrival */
+            homing_final_zero_pending = 1;
+            homing_rezero_on_arrive   = 1;
+            skip_p2p_entry = 1;
+            current_state  = STATE_AUTO;
+            start_move_deg(home_offset_deg);
           }
           lta_prev_g = lta_g;
         }
@@ -1563,16 +1546,6 @@ int main(void)
           case STATE_IDLE:
             mb_slave.registers[0x27] = 0;
             /* After homing via LT+A: wait 1s then drive to SET HOME position */
-            if (homing_final_zero_pending) {
-              if (++hfz_delay_cnt >= 100) {
-                hfz_delay_cnt = 0;
-                homing_final_zero_pending = 0;
-                skip_p2p_entry = 1;
-                current_state  = STATE_AUTO;
-                start_move_deg(home_offset_deg);
-              }
-              break;
-            }
             if (joy_is_connected()) {
               if (joy_rt_f() > 0.5f) {
                 motor_speed_cmd = joy_ly_f();              // normal speed
@@ -2158,14 +2131,10 @@ int main(void)
         } else {
           HAL_GPIO_WritePin(RESET_LED_GPIO_Port, RESET_LED_Pin, GPIO_PIN_RESET); /* off when not EMER */
 
-          if (current_state == STATE_HOMING_FAST) {
-            Y = (tl_tick % 20) < 10 ? 1 : 0;   /* 5Hz fast blink */
-
-          } else if (current_state == STATE_HOMING_BACKOFF) {
-            Y = (tl_tick % 40) < 20 ? 1 : 0;   /* 2.5Hz medium blink */
-
-          } else if (current_state == STATE_HOMING_SLOW) {
-            Y = (tl_tick % 100) < 50 ? 1 : 0;  /* 1Hz slow blink */
+          if (current_state == STATE_HOMING_FAST ||
+              current_state == STATE_HOMING_BACKOFF ||
+              current_state == STATE_HOMING_SLOW) {
+            Y = 0; G = 0; R = 0; /* tower off during homing — relay noise */
 
           } else if (!homed) {
             /* Not homed: Y↔G alternating blink — prompt to home */
