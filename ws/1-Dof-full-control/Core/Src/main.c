@@ -23,17 +23,13 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include "robot.h"
+#include "hardware.h"
+#include "modbus_app.h"
+#include "state_machine.h"
 #include "joystick.h"
 #include "modbus.h"
-#include "SCURVE.h"
-#include "TRAPEZOID.h"
-#include "ENCODER.h"
-#include "REF_FEEDFORWARD.h"
-#include "DistFF.h"
 #include "pid_control.h"
-#include "control.h"
-#include "pin_short_test.h"
-#include "pcb_io_test.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,8 +39,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// RAD_PER_CNT kept for compatibility with Modbus/dashboard code outside ISR
-#define RAD_PER_CNT  COUNTS_TO_RAD    // = 2π/8192, defined in ENCODER.h
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -74,427 +68,7 @@ TIM_HandleTypeDef htim7;
 uint32_t adc_dma_buf[40];          /* ADC2 circular DMA buffer (PA0 current sensor) */
 uint8_t  joy_dma_buf[PKT_LEN * 2];
 ModbusSlave_t mb_slave;
-
-// RP2040 joystick → USART3 PB8(RX)/PB9(TX) @ 460800 8N1, DMA1_Ch4
-
-typedef enum {
-  STATE_INIT        = 0,
-  STATE_IDLE        = 1,
-  STATE_HOMING_FAST    = 2,
-  STATE_HOMING_BACKOFF = 3,
-  STATE_HOMING_SLOW    = 4,
-  STATE_MANUAL      = 5,   /* cabinet switch HIGH — joystick motor (ST_MANUAL_SWITCH) */
-  STATE_MANUAL_MB   = 6,   /* Modbus MANUAL tab — jog + actuator (ST_MANUAL_MODBUS)  */
-  STATE_AUTO        = 7,   /* P2P / direct position move */
-  STATE_SEQUENCE    = 8,   /* Modbus multi-step pick/place */
-  STATE_TEST        = 9,
-  STATE_EMER        = 10
-} RobotState_t;
-
-RobotState_t current_state = STATE_INIT;
-
-// Motor & PID Globals (For Control Team)
-volatile float   motor_speed_cmd  = 0.0f; // -1.0 to 1.0
-volatile int32_t current_position = 0;
-volatile float   current_sensor_A = 0.0f;
-
-// Power Latch Timer
-uint32_t power_btn_hold_ms = 0;
-
-// Auto Control globals
-SCurve_t    g_scurve;
-Trapezoid_t g_trapezoid;
-volatile float ctrl_vel_rad_s  = 0.0f; // เขียน ISR, อ่าน main loop
-float ctrl_traj_start          = 0.0f;
-float ctrl_direct_target       = 0.0f;
-float ctrl_vel_integral        = 0.0f;
-float ctrl_pos_integral        = 0.0f;
-volatile uint8_t enc_reset_pending = 0;
-volatile float ctrl_acc_rad_s2 = 0.0f; // เขียน ISR, อ่าน main loop
-uint8_t sethome_led_cnt = 0;           // SET HOME LED feedback counter (@100Hz)
-
-// UI Sub-loop Counter
-uint8_t sub_loop_counter = 0;
-volatile uint8_t flag_10ms = 0;
-
-// Control team: improved encoder + PID variables
-Encoder_t my_encoder;
-volatile float vel_filtered = 0.0f;      // IIR-filtered velocity (used by PID)
-
-/* ── control.c interface globals ────────────────────────────────────────── */
-volatile float robot_pos_rad = 0.0f;          /* updated 1kHz, used by control.c */
-ControlModel_t control_model[CONTROL_MODEL_COUNT] = {
-  { .kp_vel=10.0f, .ki_vel=0.01f, .kd_vel=0.0f,
-    .kp_pos=2.0f,  .ki_pos=0.5f,  .kd_pos=0.15f,
-    .v_max=4.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
-  { .kp_vel=10.0f, .ki_vel=0.01f, .kd_vel=0.0f,
-    .kp_pos=2.0f,  .ki_pos=0.5f,  .kd_pos=0.15f,
-    .v_max=4.0f, .a_max=12.56f, .j_max=10.0f, .traj_type=0 },
-};
-volatile float   control_model_switch_deg = 9999.0f; /* always use model[0] */
-volatile uint8_t sys_ff_enabled           = 1;
-volatile float   sys_V_supply             = 24.0f;
-volatile float min_pwm_pct  = 5.0f;      // minimum PWM % to overcome motor dead zone
-volatile float ff_gain      = 0.0f;      // acceleration feedforward [%/(rad/s²)]
-#define LOOP_DT 0.001f
-
-// Pick/Place sequence timing (configurable via Live Expressions)
-volatile float seq_delay_s     = 0.5f;   // legacy — keep for python_gui compat
-volatile float seq_dwell_ms    = 200.0f; // min wait before accepting reed switch
-volatile float seq_timeout_ms  = 3000.0f;// force-advance if no reed within this time
-volatile float seq_settle_ms   = 300.0f; // wait after ctrl_settled before cylinder DOWN
-
-volatile int8_t soft_limit_dir = 0;      // 0=none +1=pos end -1=neg end (ISR writes, main reads)
-
-// Telemetry flag — default OFF (BaseSystem uses Modbus on same UART, telemetry corrupts it)
-// Set to 1 via Live Expression when using Python GUI instead of BaseSystem
-volatile uint8_t enable_telemetry = 0;
-
-// Sequence execution state (Modbus-triggered, production mode)
-typedef enum {
-  SEQ_MB_IDLE = 0,
-  SEQ_MB_GOING_PICK,
-  SEQ_MB_PICKING,
-  SEQ_MB_GOING_PLACE,
-  SEQ_MB_PLACING,
-} SeqMBState_t;
-static SeqMBState_t seq_mb_state = SEQ_MB_IDLE;
-static uint8_t  seq_mb_pair_idx  = 0;   // current pair index
-static uint32_t seq_mb_timer     = 0;   // 100Hz ticks
-static uint8_t  seq_mb_step      = 0;   // sub-step within PICKING/PLACING
-static uint8_t  skip_p2p_entry   = 0;   // set 1 when entering STATE_AUTO from jog/mode cmd
-
-// Test mode state
-typedef enum { TEST_IDLE=0, TEST_GOING_END, TEST_GOING_START } TestState_t;
-static TestState_t test_state     = TEST_IDLE;
-static int16_t     test_repeat    = 0;
-static uint8_t     test_mv_armed  = 0;   // 1 = next tick should start move
-
-// Quick pick/place from joystick (production IDLE only; LT+A=pick, LT+Y=place)
-typedef enum { JSEQ_IDLE=0, JSEQ_PK1, JSEQ_PK2, JSEQ_PK3, JSEQ_PL1, JSEQ_PL2 } JoySeqState_t;
-static JoySeqState_t joy_seq_state = JSEQ_IDLE;
-
-// Simple actuator sequence triggered by reg[0x03] (Pick=bit0, Place=bit1)
-typedef enum {
-  ACT_IDLE = 0,
-  ACT_PK_DOWN, ACT_PK_GRIP, ACT_PK_UP,   // pick: down → grip → up
-  ACT_PL_DOWN, ACT_PL_OPEN, ACT_PL_UP,   // place: down → open → up
-} ActSeqState_t;
-static ActSeqState_t act_seq_state = ACT_IDLE;
-static uint32_t      act_seq_timer = 0;
-static uint32_t      act_seq_timeout = 50;  // 100Hz ticks before forcing next step
-
-// Reed switch states — updated every 100Hz tick (active LOW: 1 = triggered)
-volatile uint8_t reed_up   = 0;   // cylinder at UP   end-stop
-volatile uint8_t reed_down = 0;   // cylinder at DOWN end-stop
-volatile uint8_t reed_grip = 0;   // gripper CLOSED
-/* Degrees from proximity sensor trigger point to the physical hole-0 mark.
-   Tune via Live Expressions after homing until hole 1 = 5°, hole 2 = 10°, etc.
-   Positive = sensor fires before hole 0 (most common). Default 0 = no offset. */
-volatile float   home_proximity_offset_deg = 0.0f;
-
-volatile uint8_t reed_dummy_en        = 1;     // 1 = simulate reed from GPIO output state
-volatile float   reed_dummy_delay_ms  = 30.0f; // delay before reed follows output (ms) — dummy mode only
-volatile float   reed_switch_delay_ms = 500.0f; // delay (ms) before switching from dummy to real reed
-
-// Homing system
-volatile uint8_t home_sensor_raw      = 0;     // 1 = triggered — watch in Live Expressions anytime
-volatile float   cumulative_angle_deg = 0.0f;  // total rotation from home (degrees, ISR-updated)
-volatile uint8_t homed                = 0;      // 1 = successfully homed this session
-volatile uint8_t homing_sensor_flag   = 0;      // set by EXTI callback, cleared by state machine
-volatile uint8_t homing_sensor_pending= 0;      // debounce: set in EXTI, validated in ISR
-
-// CAN Bus handle — declared by CubeMX at top of file (hfdcan1, PA11/PA12)
-
-// ── Reference Feedforward (model-based voltage FF) ───────────────────────────
-RefFF_t my_refff;
-DistFF_t my_distff;
-volatile uint8_t refff_enabled    = 1;      // 0=off, 1=on — toggle via Live Expressions
-volatile uint8_t distff_enabled   = 0;      // needs Kalman4 tau_d estimate to work
-volatile float   V_supply         = 24.0f;  // motor bus voltage (V)
-volatile float   g_distff_tau_d   = 0.0f;   // disturbance estimate input (from Kalman4 later)
-
-// ── Motor + Encoder direction invert ─────────────────────────────────────────
-volatile uint8_t motor_dir_inverted    = 1;     // 1 = flip PID PWM output
-volatile uint8_t encoder_inverted      = 0;     // 1 = flip encoder count direction
-volatile float   homing_fast_speed     = 0.25f; // PWM fraction for HOMING_FAST (tunable live)
-volatile float   homing_backoff_speed  = 0.10f; // PWM fraction going RIGHT after fast trigger
-volatile uint32_t homing_backoff_ticks = 100;   // 100Hz ticks to stay in backoff (100=1s)
-volatile float   home_offset_deg       = 0.0f;  // auto-move target after homing (set by set_home)
-volatile float   homing_slow_speed     = 0.09f; // PWM fraction for HOMING_SLOW (tunable live)
-/* Set 1 inside finish_homing() when proximity offset move is in progress.
-   STATE_AUTO clears it once ctrl_settled, re-zeroes encoder at the offset position. */
-volatile uint8_t homing_final_zero_pending = 0;
-volatile uint8_t homing_rezero_on_arrive   = 0; // 1 = re-zero encoder when settled at SET HOME
-
-// --- Live Expressions Dashboard & UI Testing ---
-typedef enum {
-  SYS_MODE_PRODUCTION = 0,
-  SYS_MODE_HARDWARE_TEST = 1,
-  SYS_MODE_JOYSTICK_TEST = 2,
-  SYS_MODE_AUTO_MOTOR_TEST = 3
-} SystemMode_t;
-
-/* =========================================================================
- * DevDashboard — 6 sub-structs; each appears as a named folder
- *   in Live Expressions: dev_dash → Cmd / Status / Traj / Sys / IO / Test
- * ========================================================================= */
-
-/* ── Cmd: คำสั่ง P2P (เขียน) ────────────────────────────────────────────── */
-typedef struct {
-  float    target_deg;    // เป้าหมาย (degrees จาก home)
-  uint8_t  start_move;    // Set 1 → สั่ง move (auto-clear)
-  uint8_t  set_home;      // Set 1 → zero encoder + homed=1 (auto-clear)
-  uint8_t  cancel_move;   // Set 1 → stop ทันที (auto-clear)
-} DashCmd_t;
-
-/* ── Status: สถานะ real-time (อ่าน) ─────────────────────────────────────── */
-typedef struct {
-  float        pos_deg;         // ตำแหน่ง (degrees)
-  float        pos_rad;         // ตำแหน่ง (rad)
-  float        vel_rad_s;       // ความเร็ว (rad/s)
-  float        acc_rad_s2;      // ความเร่ง (rad/s²)
-  float        pos_ideal;       // trajectory ref pos (rad)
-  float        vel_ideal;       // trajectory ref vel (rad/s)
-  float        pos_err;         // position error (rad)
-  float        vel_sp;          // vel setpoint จาก pos loop (rad/s)
-  float        pwm_out;         // motor command -1..+1
-  uint8_t      traj_active;     // 1 = trajectory กำลังทำงาน
-  float        current_A;       // กระแส (A)
-  int32_t      encoder_raw;     // encoder counts (raw)
-  float        motor_cmd;       // motor speed command (mirror)
-  RobotState_t status_state;    // current state
-} DashStatus_t;
-
-/* ── Traj: Trajectory parameters ─────────────────────────────────────────── */
-typedef struct {
-  uint8_t  traj_type;     // 0=Trapezoid  1=S-Curve  2=Direct
-  uint8_t  time_mode;     // 0=constraint-based  1=time-based
-  float    v_max;         // ความเร็วสูงสุด (rad/s)
-  float    a_max;         // ความเร่งสูงสุด (rad/s²)
-  float    j_max;         // jerk สูงสุด (rad/s³, S-Curve)
-  float    t_acc_seg;     // ช่วงเร่ง (s)
-  float    t_cruise_seg;  // ช่วง cruise (s)
-  float    t1_seg;        // S-Curve jerk segment (s)
-  float    t2_seg;        // S-Curve const-accel segment (s)
-} DashTraj_t;
-
-/* ── Sys: System config ──────────────────────────────────────────────────── */
-typedef struct {
-  SystemMode_t mode;          // 0=Production 1=HW_Test 2=Joy_Test 3=Motor_Test
-  float    max_speed;         // speed cap 0.0–1.0
-  float    ramp_rate;         // slew rate per 10ms (0.01=ช้า, 0.1=เร็ว)
-  float    acc_alpha;         // velocity filter alpha (0.1=smooth, 1.0=raw)
-  float    cur_zero_v;        // current sensor zero voltage
-  float    cur_sens;          // sensitivity V/A (0.066)
-  uint8_t  telemetry_mode;    // 0=Modbus  1=Simulink via LPUART1
-} DashSys_t;
-
-/* ── IO: Raw GPIO + Joystick (อ่าน) ─────────────────────────────────────── */
-typedef struct {
-  uint8_t  in_estop;          uint8_t  in_mode;
-  uint8_t  in_reset;          uint8_t  in_power;
-  uint8_t  out_pwm;           uint8_t  out_dir;
-  uint8_t  out_power_latch;   uint8_t  out_pneumatic;  uint8_t  out_gripper;
-  uint8_t  out_tower_g;       uint8_t  out_tower_y;    uint8_t  out_tower_r;
-  uint8_t  out_reset_led;     uint8_t  out_emer;
-  uint8_t  reed_up;           uint8_t  reed_down;      uint8_t  reed_grip;
-  uint8_t  joy_connected;     float    joy_ly;
-  float    joy_lt;            float    joy_rt;
-  uint16_t joy_buttons;
-} DashIO_t;
-
-/* ── Test: HW test overrides (mode=1 or 3) ──────────────────────────────── */
-typedef struct {
-  float    force_motor;
-  uint8_t  force_pneumatic;   uint8_t  force_gripper;
-  uint8_t  force_tower_g;     uint8_t  force_tower_y;
-  uint8_t  force_tower_r;     uint8_t  force_emer;
-  float    test_speed;
-  uint16_t test_period_fwd_ms;
-  uint16_t test_period_rev_ms;
-} DashTest_t;
-
-/* ── Ctrl: Control team Live Expressions interface ───────────────────────── */
-/* R/W fields: write to tune — applied to control_model[0] every 100 Hz.
- * R/O fields (g_*, ss_*): updated every 100 Hz from control.c observables. */
-typedef struct {
-  /* 1 · Master Control ──────────────────────────────────────── */
-  uint8_t  control_mode;        /* 3=Cascade (only mode used) */
-  uint8_t  traj_type;           /* 0=Trapezoid  1=S-Curve  2=Direct */
-  uint8_t  pid_enabled;         /* 0=freeze PIDs  1=run */
-  uint8_t  start_move;          /* write 1 → move to traj_target_deg, self-clears */
-  uint8_t  reset_all;           /* write 1 → control_reset(), self-clears */
-  uint8_t  zero_encoder;        /* write 1 → set-home at current pos, self-clears */
-  uint8_t  apply_motor_params;  /* reserved */
-
-  /* 2 · Trajectory ──────────────────────────────────────────── */
-  float    traj_target_deg;
-  float    max_velocity;        /* rad/s */
-  float    max_accel;           /* rad/s² */
-  float    max_jerk;            /* rad/s³  (S-Curve only) */
-  float    t1_seg;
-  float    t2_seg;
-  float    t_acc_seg;
-  float    t_cruise_seg;
-  float    t_dec_seg;
-
-  /* 3 · Position PID (outer loop) ──────────────────────────── */
-  float    kp_position;
-  float    ki_pos;
-  float    kd_pos;
-  float    pos_deadband_deg;    /* |pos_err| < this AND vel < vel_deadband → settled */
-  float    vel_deadband;        /* |vel| < this (rad/s) → settled; default 1.0 */
-  float    pos_integral_live;   /* R/O */
-
-  /* 4 · Velocity PID (inner loop) ──────────────────────────── */
-  float    kp_vel;
-  float    ki_vel;
-  float    kd_vel;
-  float    min_pwm_threshold;
-
-  /* 5 · Motor Parameters ───────────────────────────────────── */
-  float    motor_J_eq;
-  float    motor_b_eq;
-  float    motor_N;
-  float    motor_Kt;
-  float    motor_Ke;
-  float    motor_L;
-  float    motor_R_arm;
-
-  /* 6 · Reference Feedforward ──────────────────────────────── */
-  uint8_t  refff_enabled;
-  float    V_supply;
-  uint8_t  distff_enabled;
-  float    distff_tau;
-  float    g_distff_pwm;        /* R/O */
-
-  /* 7 · Kalman 2-State ─────────────────────────────────────── */
-  uint8_t  kalman_enabled;
-  float    kf_meas_noise;
-  float    kf_proc_vel_noise;
-  float    g_kf_velocity;       /* R/O */
-  float    g_kf_position;       /* R/O */
-
-  /* 8 · Kalman4 ────────────────────────────────────────────── */
-  float    kf4_sigma_v2;
-  float    kf4_r_theta;
-  float    g_kf4_position;      /* R/O */
-  float    g_kf4_velocity;      /* R/O */
-  float    g_kf4_current;       /* R/O */
-  float    g_kf4_tau_d_obs;     /* R/O */
-
-  /* 9 · Kalman4 Calibration ────────────────────────────────── */
-  float    kf_cal_pwm;
-  uint8_t  kf_sine_enabled;
-  float    kf_sine_amp;
-  float    kf_sine_freq;
-  float    kf_sine_dir;
-
-  /* 10 · Current Sensor ────────────────────────────────────── */
-  float    current_zero_counts;
-  float    current_counts_per_amp;
-  uint32_t adc_raw_current;     /* R/O */
-  float    g_current_A;         /* R/O */
-
-  /* 11 · Observables R/O ───────────────────────────────────── */
-  float    ss_error_deg;
-  float    ss_error_rad;
-  uint8_t  ss_reached;
-  float    ss_final_error_deg;
-  float    vel_error_live;
-  float    i_term_live;
-  float    g_traj_pos;
-  float    g_smooth_vel;
-  float    g_smooth_accel;
-  float    g_jerk;
-  float    g_position_rad;
-  float    g_velocity_rad_s;
-  float    g_pwm_duty;
-  float    g_motor_voltage;
-
-  /* 12 · Hardware ──────────────────────────────────────────── */
-  uint8_t  motor_dir_inverted;
-  uint8_t  gripper_updown;
-  uint8_t  gripper_openclose;
-  uint8_t  emer_output_ctrl;
-
-  /* 13 · Sequence Mode ─────────────────────────────────────── */
-  float    seq_targets[9];
-  uint8_t  seq_count_ctrl;
-  uint8_t  seq_enabled;
-  uint8_t  seq_index;           /* R/O */
-  float    seq_step_delay;
-
-  /* 14 · Sweep Mode ────────────────────────────────────────── */
-  uint8_t  sweep_enabled;
-  float    sweep_start_deg;
-  float    sweep_stop_deg;
-  float    sweep_step_deg;
-  float    sweep_delay_s;
-  uint8_t  sweep_index;         /* R/O */
-} DashCtrl_t;
-
-typedef struct {
-  DashCmd_t    Cmd;     // คำสั่ง P2P (เขียน)
-  DashStatus_t Status;  // สถานะ real-time (อ่าน)
-  DashTraj_t   Traj;    // Trajectory params
-  DashSys_t    Sys;     // System config
-  DashIO_t     IO;      // Raw GPIO + Joystick
-  DashTest_t   Test;    // Test mode overrides
-  DashCtrl_t   Ctrl;    // Control team Live Expressions interface
-} DevDashboard_t;
-
-DevDashboard_t dev_dash = {
-  .Sys.mode            = SYS_MODE_PRODUCTION,
-  .Sys.ramp_rate       = 0.05f,
-  .Sys.max_speed       = 1.0f,
-  .Sys.cur_zero_v      = 2.46f,
-  .Sys.cur_sens        = 0.066f,
-  .Sys.telemetry_mode  = 0,
-  .Sys.acc_alpha       = 0.2f,
-  .Traj.traj_type      = 0,
-  .Traj.time_mode      = 0,
-  .Traj.v_max          = 6.28f,
-  .Traj.a_max          = 12.56f,
-  .Traj.j_max          = 10.0f,
-  .Traj.t1_seg         = 0.1f,
-  .Traj.t2_seg         = 0.1f,
-  .Traj.t_acc_seg      = 0.3f,
-  .Traj.t_cruise_seg   = 0.2f,
-  .Test.test_speed         = 0.30f,
-  .Test.test_period_fwd_ms = 1000,
-  .Test.test_period_rev_ms = 1000,
-  /* Ctrl — control team defaults */
-  .Ctrl.control_mode    = 3,
-  .Ctrl.traj_type       = 0,
-  .Ctrl.pid_enabled     = 1,
-  .Ctrl.max_velocity    = 4.0f,
-  .Ctrl.max_accel       = 12.56f,
-  .Ctrl.max_jerk        = 10.0f,
-  .Ctrl.kp_position     = 2.0f,
-  .Ctrl.ki_pos          = 0.5f,
-  .Ctrl.kd_pos          = 0.15f,
-  .Ctrl.pos_deadband_deg = 0.35f,
-  .Ctrl.vel_deadband     = 1.0f,
-  .Ctrl.kp_vel          = 10.0f,
-  .Ctrl.ki_vel          = 0.01f,
-  .Ctrl.kd_vel          = 0.0f,
-  .Ctrl.min_pwm_threshold = 0.1f,
-  .Ctrl.motor_J_eq      = 0.027f,
-  .Ctrl.motor_b_eq      = 0.5f,
-  .Ctrl.motor_N         = 50.0f,
-  .Ctrl.motor_Kt        = 0.00747f,
-  .Ctrl.motor_Ke        = 0.0083f,
-  .Ctrl.motor_L         = 0.0012794f,
-  .Ctrl.motor_R_arm     = 2.8f,
-  .Ctrl.refff_enabled      = 1,
-  .Ctrl.V_supply           = 24.0f,
-  .Ctrl.distff_enabled     = 0,
-  .Ctrl.distff_tau         = 0.02f,
-  .Ctrl.motor_dir_inverted = 1,
-};
-
+uint8_t  skip_p2p_entry = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -510,7 +84,7 @@ static void MX_ADC2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
-static void Send_Telemetry(void);
+void Send_Telemetry(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -521,81 +95,6 @@ static void Send_Telemetry(void);
   #define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
 #endif
 PUTCHAR_PROTOTYPE { return ch; }
-
-// ── EEPROM stubs (implement Flash write when hardware is ready) ───────────
-static void eeprom_save(float angle_deg) { (void)angle_deg; /* TODO: Flash write */ }
-static float eeprom_load(void)           { return 0.0f;     /* TODO: Flash read  */ }
-
-static void start_move_deg(float deg);  /* forward declaration */
-
-// ── Enable HOME_SENSOR EXTI — PC3, RISING edge, PULLUP ───────────────────
-// Normal: NPN sinks → LOW(0). Blade detected: NPN off → PULLUP → HIGH(1).
-static void homing_exti_enable(void) {
-  __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
-  homing_sensor_flag   = 0;
-  homing_sensor_pending= 0;
-  GPIO_InitTypeDef g   = {0};
-  g.Pin       = HOME_SENSOR_Pin;
-  g.Mode      = GPIO_MODE_IT_RISING;
-  g.Pull      = GPIO_PULLUP;
-  HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
-}
-
-// ── Disable HOME_SENSOR EXTI ──────────────────────────────────────────────
-static void homing_exti_disable(void) {
-  HAL_NVIC_DisableIRQ(EXTI3_IRQn);
-  __HAL_GPIO_EXTI_CLEAR_IT(HOME_SENSOR_Pin);
-  GPIO_InitTypeDef g = {0};
-  g.Pin  = HOME_SENSOR_Pin;
-  g.Mode = GPIO_MODE_INPUT;
-  g.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(HOME_SENSOR_GPIO_Port, &g);
-}
-
-// ── Finish homing: zero encoder at sensor, then move to proximity offset ─────
-static void finish_homing(void) {
-  homing_exti_disable();
-  homing_sensor_flag = 0;
-  __disable_irq();
-  enc_reset_pending    = 1;
-  cumulative_angle_deg = 0.0f;
-  ctrl_direct_target   = 0.0f;
-  ctrl_traj_start      = 0.0f;
-  motor_speed_cmd      = 0.0f;
-  __enable_irq();
-  control_reset();
-  homed = 1;
-  eeprom_save(0.0f);
-  mb_slave.registers[0x27] = 0;
-
-  current_state = STATE_IDLE;
-}
-
-// Start a trajectory move to target_deg (degrees). Delegates to control_set_target().
-static void start_move_deg(float deg)
-{
-  float target_rad   = deg * (3.14159265f / 180.0f);
-  ctrl_direct_target = target_rad;
-  ctrl_traj_start    = my_encoder.position_rad;
-  control_set_target(target_rad);
-}
-
-static void start_move_hole(int16_t raw)
-{
-  int16_t hole      = (raw >= 0) ? raw : (int16_t)(-raw);
-  float   target_abs= (float)hole * 5.0f;
-  float pos_cumul = my_encoder.position_rad * (180.0f / 3.14159265f);
-  float pos_mod   = fmodf(pos_cumul, 360.0f);
-  if (pos_mod < 0.0f) pos_mod += 360.0f;
-  float disp;
-  if (raw >= 0)
-    disp =  fmodf((target_abs - pos_mod) + 360.0f, 360.0f);
-  else
-    disp = -fmodf((pos_mod - target_abs) + 360.0f, 360.0f);
-  start_move_deg(pos_cumul + disp);
-}
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
@@ -719,9 +218,8 @@ int main(void)
   
   // HOME_SENSOR: plain input (EXTI enabled only during homing)
   homing_exti_disable();
-  // Load cumulative angle from EEPROM — always home on startup for now
-  cumulative_angle_deg = eeprom_load();
-  homed = 0; // must home every session until Flash persistence is implemented
+  cumulative_angle_deg = 0.0f; /* TODO: load from Flash when ready */
+  homed = 0;
 
   current_state = STATE_IDLE;
   mb_slave.registers[0x00] = 22881; // Initialize Heartbeat (YA)
@@ -787,314 +285,35 @@ int main(void)
     if (flag_10ms) {
       flag_10ms = 0;
 
-      // 0. Robust ESTOP Polling (Anti-EMI Noise)
-      static uint8_t estop_debounce = 0;
-      if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
-        if (estop_debounce < 25) estop_debounce++;
-        if (estop_debounce >= 20) { // Requires 200ms of solid LOW signal to trigger
-          current_state = STATE_EMER;
-          motor_speed_cmd = 0.0f;
-          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
-          HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
-          /* RESET_LED blink handled by tower lights section */
-        }
-      } else {
-        estop_debounce = 0;
-      }
-      
-      // 0.5. Reed Switch State
-      {
-        /* Transition tracking: when dummy disabled, hold dummy values for reed_switch_delay_ms */
-        static uint8_t  rd_prev_dummy = 0xFF;
-        static uint32_t rd_sw_timer   = 0;
-        static uint8_t  last_pneu     = 0xFF, last_grip_out = 0xFF;
-        static uint32_t pneu_timer    = 0,    grip_timer    = 0;
-        static uint8_t  pneu_pend     = 0,    grip_pend     = 0;
-
-        if (rd_prev_dummy == 0xFF) rd_prev_dummy = reed_dummy_en;
-
-        if (rd_prev_dummy && !reed_dummy_en) {
-          /* dummy→real: start hold timer */
-          uint32_t sw_t = (uint32_t)(reed_switch_delay_ms / 10.0f);
-          rd_sw_timer = (sw_t < 1) ? 1 : sw_t;
-        }
-        if (!rd_prev_dummy && reed_dummy_en) {
-          /* real→dummy: re-snapshot on first dummy tick */
-          last_pneu = 0xFF; last_grip_out = 0xFF;
-          pneu_pend = 0;    grip_pend     = 0;
-        }
-        if (rd_sw_timer > 0) rd_sw_timer--;
-        rd_prev_dummy = reed_dummy_en;
-        uint8_t use_dummy = reed_dummy_en || (rd_sw_timer > 0);
-
-        if (!use_dummy) {
-          /* Real hardware: NC contact, COM=3V3, PULLDOWN → active LOW */
-          reed_up   = (HAL_GPIO_ReadPin(REED_UP_GPIO_Port,   REED_UP_Pin)   == REED_ACTIVE) ? 1 : 0;
-          reed_down = (HAL_GPIO_ReadPin(REED_DOWN_GPIO_Port, REED_DOWN_Pin) == REED_ACTIVE) ? 1 : 0;
-          reed_grip = (HAL_GPIO_ReadPin(REED_GRIP_GPIO_Port, REED_GRIP_Pin) == REED_ACTIVE) ? 1 : 0;
-        } else {
-          /* Dummy mode: mirror GPIO output state after reed_dummy_delay_ms */
-          uint32_t delay_ticks = (uint32_t)(reed_dummy_delay_ms / 10.0f + 0.5f);
-          if (delay_ticks < 1) delay_ticks = 1;
-
-          uint8_t cur_pneu = (HAL_GPIO_ReadPin(PNEUMATIC_GPIO_Port, PNEUMATIC_Pin) == GPIO_PIN_SET) ? 1 : 0;
-          uint8_t cur_grip = (HAL_GPIO_ReadPin(GRIPPER_GPIO_Port,   GRIPPER_Pin)   == GPIO_PIN_SET) ? 1 : 0;
-
-          if (last_pneu == 0xFF) { last_pneu = cur_pneu; reed_down = cur_pneu; reed_up = !cur_pneu; }
-          else if (cur_pneu != last_pneu) { last_pneu = cur_pneu; pneu_pend = 1; pneu_timer = 0; }
-          if (pneu_pend && ++pneu_timer >= delay_ticks) {
-            pneu_pend = 0; reed_down = cur_pneu; reed_up = !cur_pneu;
-          }
-
-          if (last_grip_out == 0xFF) { last_grip_out = cur_grip; reed_grip = cur_grip; }
-          else if (cur_grip != last_grip_out) { last_grip_out = cur_grip; grip_pend = 1; grip_timer = 0; }
-          if (grip_pend && ++grip_timer >= delay_ticks) {
-            grip_pend = 0; reed_grip = cur_grip;
-          }
-        }
-      }
-      home_sensor_raw = (HAL_GPIO_ReadPin(HOME_SENSOR_GPIO_Port, HOME_SENSOR_Pin) == HOME_SENSOR_ACTIVE) ? 1 : 0;
-
-      // 1. Read current sensor — average DMA circular buffer (ADC2 PA0)
-      {
-        uint32_t asum = 0;
-        for (int i = 0; i < 40; i++) asum += adc_dma_buf[i];
-        float v = ((float)(asum / 40u) / 4095.0f) * 3.3f;
-        float i_a = (v - dev_dash.Sys.cur_zero_v) / dev_dash.Sys.cur_sens;
-        if (i_a < 0.0f) i_a = -i_a;
-        current_sensor_A = i_a;
-      }
-      // 2. Joystick UART health — re-arm DMA proactively when RP2040 times out
-      // HAL_UART_ErrorCallback covers framing errors; this covers silent-death
-      {
-        static uint8_t joy_was_alive = 0;
-        uint8_t joy_now_alive = joy_rp2040_alive();
-        if (joy_was_alive && !joy_now_alive) {
-          HAL_UART_AbortReceive(&huart3);
-          HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
-          __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
-        }
-        joy_was_alive = joy_now_alive;
-      }
-
-      // 3. Process incoming Modbus frames (Always ON in Multiplexed mode)
+      hardware_sensors_update();
       modbus_process(&mb_slave);
+      modbus_app_receive();
+      modbus_app_send();
 
-      // --- AI Auto-Tuner & Python UI Integration ---
-      // แยก Register สำหรับ Python UI ออกมาเพื่อไม่ให้ชนกับระบบเดิม
-      // Reg 10: Step CMD, Reg 11: Target Pos, Reg 12: Kp, Reg 13: Ki, Reg 14: Kd, Reg 15: Apply
-      static uint8_t python_step_active = 0;
-      int16_t step_cmd = (int16_t)mb_slave.registers[10];
-      if (step_cmd != 0) {
-        dev_dash.Sys.mode = SYS_MODE_HARDWARE_TEST;
-        dev_dash.Test.force_motor = (float)step_cmd / 10000.0f; 
-        python_step_active = 1;
-      } else if (python_step_active) {
-        dev_dash.Sys.mode = SYS_MODE_PRODUCTION;
-        dev_dash.Test.force_motor = 0.0f;
-        python_step_active = 0;
-      }
-
-      if (mb_slave.registers[15] == 1) {
-        kp_vel = (float)mb_slave.registers[12] / 100.0f;
-        ki_vel = (float)mb_slave.registers[13] / 100.0f;
-        kd_vel = (float)mb_slave.registers[14] / 100.0f;
-        
-        float target_rad = (float)((int16_t)mb_slave.registers[11]) / 1000.0f;
-        dev_dash.Cmd.target_deg = target_rad * (180.0f / 3.14159265f);
-        
-        // Trajectory overrides (moved to 0x38-0x3F, clear of BaseSystem map)
-        if (mb_slave.registers[0x38] <= 2) {
-             dev_dash.Traj.traj_type = (uint8_t)mb_slave.registers[0x38];
-        }
-        if (mb_slave.registers[0x39] > 0) {
-             dev_dash.Traj.v_max = (float)mb_slave.registers[0x39] / 100.0f;
-        }
-        if (mb_slave.registers[0x3B] > 0) {
-             dev_dash.Traj.a_max = (float)mb_slave.registers[0x3B] / 100.0f;
-        }
-        if (mb_slave.registers[0x3C] > 0) {
-             dev_dash.Traj.j_max = (float)mb_slave.registers[0x3C] / 100.0f;
-        }
-        if (mb_slave.registers[0x3D] > 0) {
-             kp_pos = (float)mb_slave.registers[0x3D] / 100.0f;
-        }
-        kd_pos = (float)mb_slave.registers[0x3E] / 100.0f;
-        ki_pos = (float)mb_slave.registers[0x3F] / 100.0f;
-
-        dev_dash.Cmd.start_move = 1;
-        
-        // Force the State Machine to AUTO so it actually executes the move!
-        if (current_state != STATE_EMER) {
-            skip_p2p_entry = 1;
-            current_state = STATE_AUTO;
-        }
-        
-        mb_slave.registers[15] = 0; // Clear apply flag
-      }
-
-      // Reg 21: Set Home
-      if (mb_slave.registers[21] == 1) {
-        dev_dash.Cmd.set_home = 1;
-        mb_slave.registers[21] = 0;
-      }
-
-      // Reg 25: STOP — หยุดทันที ค้างตำแหน่งปัจจุบัน (ไม่เข้า EMER)
-      if (mb_slave.registers[25] == 1) {
-        mb_slave.registers[25] = 0;
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
-        motor_speed_cmd       = 0.0f;
-        vel_filtered          = 0.0f;
-        float hold = my_encoder.position_rad;
-        ctrl_direct_target    = hold;
-        ctrl_traj_start       = hold;
-        dev_dash.Cmd.target_deg = hold * (180.0f / 3.14159f);
-        dev_dash.Cmd.start_move = 0;
-        control_reset();
-      }
-
-      /* ── dev_dash.Ctrl sync (100 Hz) ─────────────────────────────────────
-       * R/W: Ctrl fields → control system globals
-       * R/O: ctrl_* observables → Ctrl read-only fields
-       * Self-clearing commands: start_move, reset_all, zero_encoder        */
+      /* ESTOP debounce — same position as original main.c (before state machine) */
       {
-        DashCtrl_t *C = &dev_dash.Ctrl;
-
-        /* ── R/W → apply to control_model[0] ──────────────────────────── */
-        control_model[0].traj_type = C->traj_type;
-        control_model[0].v_max     = C->max_velocity;
-        control_model[0].a_max     = C->max_accel;
-        control_model[0].j_max     = C->max_jerk;
-        control_model[0].kp_pos    = C->kp_position;
-        control_model[0].ki_pos    = C->ki_pos;
-        control_model[0].kd_pos    = C->kd_pos;
-        control_model[0].kp_vel    = C->kp_vel;
-        control_model[0].ki_vel    = C->ki_vel;
-        control_model[0].kd_vel    = C->kd_vel;
-        control_model[1]           = control_model[0]; /* switch disabled */
-        ctrl_pos_deadband_deg      = C->pos_deadband_deg;
-        ctrl_vel_deadband          = C->vel_deadband;
-        sys_ff_enabled             = C->refff_enabled;
-        sys_V_supply               = C->V_supply;
-        refff_enabled              = C->refff_enabled;
-        V_supply                   = C->V_supply;
-        motor_dir_inverted         = C->motor_dir_inverted;
-        /* Also keep pid_control.c globals in sync (python_gui compat) */
-        kp_vel = C->kp_vel;  ki_vel = C->ki_vel;  kd_vel = C->kd_vel;
-        kp_pos = C->kp_position; ki_pos = C->ki_pos; kd_pos = C->kd_pos;
-
-        /* ── Self-clearing commands ─────────────────────────────────────── */
-        if (C->start_move) {
-          C->start_move = 0;
-          dev_dash.Cmd.target_deg = C->traj_target_deg;
-          dev_dash.Cmd.start_move = 1;
-          if (current_state != STATE_EMER) { skip_p2p_entry = 1; current_state = STATE_AUTO; }
-        }
-        if (C->reset_all) {
-          C->reset_all = 0;
-          control_reset();
-          motor_speed_cmd = 0.0f;
-        }
-        if (C->zero_encoder) {
-          C->zero_encoder = 0;
-          dev_dash.Cmd.set_home = 1;
-        }
-
-        /* ── R/O: observables → Ctrl ────────────────────────────────────── */
-        C->ss_error_rad       = ctrl_pos_err;
-        C->ss_error_deg       = ctrl_pos_err * (180.0f / 3.14159265f);
-        C->ss_reached         = ctrl_settled;
-        C->vel_error_live     = ctrl_vel_err;
-        C->i_term_live        = vel_integral;   /* from pid_control.c */
-        C->g_traj_pos         = ctrl_ideal_pos * (180.0f / 3.14159265f);
-        C->g_smooth_vel       = vel_filtered * (180.0f / 3.14159265f);
-        C->g_smooth_accel     = ctrl_acc_rad_s2 * (180.0f / 3.14159265f);
-        C->g_position_rad     = my_encoder.position_rad;
-        C->g_velocity_rad_s   = vel_filtered;
-        C->g_pwm_duty         = motor_speed_cmd;
-        C->g_motor_voltage    = motor_speed_cmd * C->V_supply;
-        C->g_current_A        = current_sensor_A;
-        C->pos_integral_live  = pos_integral;   /* from pid_control.c */
-        C->seq_step_delay     = seq_dwell_ms / 1000.0f;
-      }
-
-      // 3. Update Status Registers (BaseSystem v1.1)
-      mb_slave.registers[0x2F] = (uint16_t)current_state;
-      mb_slave.registers[0x23] = (uint16_t)homed;
-      mb_slave.registers[0x26] = (reed_up   ? 1 : 0) |
-                                 (reed_down ? 2 : 0) |
-                                 (reed_grip ? 4 : 0);
-      // Position: wrapped 0-359.99° × 10
-      {
-        float _pd = my_encoder.position_rad * (180.0f / 3.14159265f);
-        _pd = fmodf(_pd, 360.0f);
-        if (_pd < 0.0f) _pd += 360.0f;
-        mb_slave.registers[0x28] = (int16_t)(_pd * 10.0f);
-      }
-      // Velocity: deg/s × 10
-      mb_slave.registers[0x29] = (int16_t)(vel_filtered * (180.0f / 3.14159265f) * 10.0f);
-      // Acceleration: deg/s² × 10
-      mb_slave.registers[0x30] = (int16_t)(ctrl_acc_rad_s2 * (180.0f / 3.14159265f) * 10.0f);
-      // ESTOP
-      mb_slave.registers[0x31] = (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) ? 1 : 0;
-      // Current (mA)
-      mb_slave.registers[0x3A] = (uint16_t)(current_sensor_A * 1000.0f);
-      // reg[0x32]: Digital IO status — bit0=HOME_SENSOR, bit1=POWER_BTN, bit2=RESET_BTN, bit3=MODE(1=MANUAL)
-      mb_slave.registers[0x32] =
-          (home_sensor_raw ? 0x01 : 0) |
-          ((HAL_GPIO_ReadPin(POWER_BTN_GPIO_Port,  POWER_BTN_Pin)  == GPIO_PIN_RESET) ? 0x02 : 0) |
-          ((HAL_GPIO_ReadPin(RESET_BTN_GPIO_Port,  RESET_BTN_Pin)  == GPIO_PIN_RESET) ? 0x04 : 0) |
-          ((HAL_GPIO_ReadPin(MODE_GPIO_Port,        MODE_Pin)       == GPIO_PIN_SET)   ? 0x08 : 0);
-      // reg[0x33-0x36]: Sys params — R/W, host writes → applied each cycle
-      if (mb_slave.registers[0x33] <= 3)
-          dev_dash.Sys.mode      = (SystemMode_t)mb_slave.registers[0x33];
-      else mb_slave.registers[0x33] = (uint16_t)dev_dash.Sys.mode;
-      if (mb_slave.registers[0x34] >= 1 && mb_slave.registers[0x34] <= 100)
-          dev_dash.Sys.max_speed = (float)mb_slave.registers[0x34] / 100.0f;
-      else mb_slave.registers[0x34] = (uint16_t)(dev_dash.Sys.max_speed * 100.0f);
-      if (mb_slave.registers[0x35] >= 1 && mb_slave.registers[0x35] <= 500)
-          dev_dash.Sys.ramp_rate = (float)mb_slave.registers[0x35] / 1000.0f;
-      else mb_slave.registers[0x35] = (uint16_t)(dev_dash.Sys.ramp_rate * 1000.0f);
-      encoder_inverted = (uint8_t)(mb_slave.registers[0x36] & 0x01);
-
-      // Heartbeat Logic
-      static uint32_t hb_timer = 0;
-      hb_timer++;
-      if (mb_slave.registers[0x00] == 18537) {
-        // UI replied HI
-        hb_timer = 0;
-        mb_slave.registers[0x00] = 22881; // Ask YA again
-      } else if (hb_timer > 300) { // 3 seconds timeout
-        // UI is disconnected
-        // Handle disconnection if needed
-      }
-
-      // Handle Hardware Selector Switch (LOW=Modbus/AUTO, HIGH=MANUAL joystick)
-      // First tick: snapshot switch state, do NOT change current_state.
-      // Only on real edge changes (switch physically moved) do we transition.
-      static GPIO_PinState last_mode_switch = (GPIO_PinState)2;
-      static uint8_t mode_switch_initialized = 0;
-      GPIO_PinState current_mode_switch = HAL_GPIO_ReadPin(MODE_GPIO_Port, MODE_Pin);
-      if (current_mode_switch != last_mode_switch) {
-        if (!mode_switch_initialized) {
-          /* Boot: just record pin state, keep STATE_IDLE (don't block BaseSystem) */
-          mode_switch_initialized = 1;
-        } else if (current_state != STATE_EMER && current_state != STATE_SEQUENCE &&
-                   current_state != STATE_TEST && dev_dash.Sys.mode == SYS_MODE_PRODUCTION) {
-          if (current_mode_switch == GPIO_PIN_SET) {
-            /* Switch flipped to MANUAL: stop motor, joystick takes over */
+        static uint8_t estop_debounce = 0;
+        if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
+          if (estop_debounce < 25) estop_debounce++;
+          if (estop_debounce >= 20) {
+            current_state   = STATE_EMER;
             motor_speed_cmd = 0.0f;
-            control_reset();
-            current_state = STATE_MANUAL;
-          } else {
-            /* Switch flipped back to Modbus: return to IDLE */
-            motor_speed_cmd = 0.0f;
-            current_state = STATE_IDLE;
+            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
+            HAL_GPIO_WritePin(EMER_OUTPUT_GPIO_Port, EMER_OUTPUT_Pin, GPIO_PIN_RESET);
           }
+        } else {
+          estop_debounce = 0;
         }
-        last_mode_switch = current_mode_switch;
       }
 
+      state_machine_tick();
+    }
+  }
+  /* USER CODE END 3 */
+}
+
+/* ── DEAD CODE REMOVED — kept below as separator ── */
+#if 0
       // ── EMER: ทำงานทุกโหมด (HW Test, Joy Test, Auto Test, Production) ─────
       float safe_speed = 0.0f; // stays 0 when EMER active
       uint8_t emer_active = (current_state == STATE_EMER);
@@ -1145,8 +364,22 @@ int main(void)
         }
         if (dev_dash.Cmd.set_home) {
           dev_dash.Cmd.set_home = 0;
-          /* Mark current position as home — store offset, no encoder reset, no movement */
+          /* 1. Stop motor immediately */
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
+          motor_speed_cmd = 0.0f;
+          /* 2. Store sensor→home distance */
           home_offset_deg = cumulative_angle_deg;
+          /* 3. Re-zero encoder at this point */
+          __disable_irq();
+          enc_reset_pending    = 1;
+          cumulative_angle_deg = 0.0f;
+          ctrl_direct_target   = 0.0f;
+          ctrl_traj_start      = 0.0f;
+          __enable_irq();
+          /* 4. Reset PID with target = current pos (0) — no movement */
+          control_reset();
+          control_set_target(0.0f);
+          homed           = 1;
           sethome_led_cnt = 1;
         }
       }
@@ -1406,6 +639,8 @@ int main(void)
             ctrl_traj_start      = 0.0f;
             __enable_irq();
             control_reset();
+            control_set_target(0.0f);
+            home_offset_deg = 0.0f; /* arrived at home, reset offset */
           }
           current_state = STATE_IDLE;
         }
@@ -1433,12 +668,12 @@ int main(void)
           if (lta_g && !lta_prev_g && homed &&
               (current_state == STATE_IDLE || current_state == STATE_AUTO ||
                current_state == STATE_MANUAL || current_state == STATE_MANUAL_MB)) {
-            /* GO HOME: drive to SET HOME position, re-zero encoder on arrival */
-            homing_final_zero_pending = 1;
-            homing_rezero_on_arrive   = 1;
+            /* GO HOME: drive to 0° (SET HOME point), no re-zero on arrival */
+            homing_final_zero_pending = 0;
+            homing_rezero_on_arrive   = 0;
             skip_p2p_entry = 1;
             current_state  = STATE_AUTO;
-            start_move_deg(home_offset_deg);
+            start_move_deg(0.0f);
           }
           lta_prev_g = lta_g;
         }
@@ -1484,11 +719,21 @@ int main(void)
             current_state != STATE_HOMING_BACKOFF &&
             current_state != STATE_HOMING_SLOW) {
           uint16_t mode_cmd = mb_slave.registers[0x01];
-          if (mode_cmd & 0x01) {  // HOME — any state
-            motor_speed_cmd = 0.0f;
-            control_reset();
-            homing_exti_enable();
-            current_state = STATE_HOMING_FAST;
+          if (mode_cmd & 0x01) {  // HOME
+            if (homed) {
+              /* Already homed: go to 0° (SET HOME point) same as LT+A */
+              homing_final_zero_pending = 0;
+              homing_rezero_on_arrive   = 0;
+              skip_p2p_entry = 1;
+              current_state  = STATE_AUTO;
+              start_move_deg(0.0f);
+            } else {
+              /* First time: run homing sequence via sensor */
+              motor_speed_cmd = 0.0f;
+              control_reset();
+              homing_exti_enable();
+              current_state = STATE_HOMING_FAST;
+            }
             mb_slave.registers[0x01] = 0;
           } else if (mode_cmd & 0x02) {  // MANUAL_MB or sequence trigger
             control_reset();
@@ -1510,7 +755,7 @@ int main(void)
           } else if (mode_cmd & 0x04) {  // AUTO — requires homed
             if (homed) { skip_p2p_entry = 0; current_state = STATE_AUTO; seq_mb_state = SEQ_MB_IDLE; seq_mb_pair_idx = 0; }
             mb_slave.registers[0x01] = 0;
-          } else if (mode_cmd & 0x08) {  // SET HOME
+          } else if (mode_cmd & 0x08) {  // SET HOME — same as RT+A
             dev_dash.Cmd.set_home = 1;
             mb_slave.registers[0x01] = 0;
           } else if (mode_cmd & 0x10) {  // TEST
@@ -2234,14 +1479,11 @@ int main(void)
       
       // Heartbeat LED
       static uint32_t last_hb = 0;
-      if (++last_hb > 50) { // 500ms at 100Hz
+      if (++last_hb > 50) {
         HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
         last_hb = 0;
       }
-    }
-  }
-  /* USER CODE END 3 */
-}
+#endif
 
 /**
   * @brief System Clock Configuration
@@ -2807,7 +2049,7 @@ static void MX_GPIO_Init(void)
 //
 // Python: Serial Receive → 24 bytes → unpack 5×float
 //
-static void Send_Telemetry(void)
+void Send_Telemetry(void)
 {
   uint8_t buf[24];
   float pos     = (float)(current_position) * RAD_PER_CNT;
