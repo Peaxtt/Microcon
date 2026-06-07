@@ -19,7 +19,6 @@ static TestState_t   test_state      = TEST_IDLE;
 static int16_t       test_repeat     = 0;
 static uint8_t       test_mv_armed   = 0;
 
-static JoySeqState_t joy_seq_state   = JSEQ_IDLE;
 
 static ActSeqState_t act_seq_state   = ACT_IDLE;
 static uint32_t      act_seq_timer   = 0;
@@ -64,7 +63,7 @@ void finish_homing(void)
   homing_sensor_flag = 0;
   __disable_irq();
   enc_reset_pending    = 1;
-  cumulative_angle_deg = -home_offset_deg;
+  cumulative_angle_deg = 0.0f;
   ctrl_direct_target   = 0.0f;
   ctrl_traj_start      = 0.0f;
   motor_speed_cmd      = 0.0f;
@@ -87,16 +86,16 @@ static void start_move_deg(float deg)
 static void start_move_hole(int16_t raw)
 {
   int16_t hole       = (raw >= 0) ? raw : (int16_t)(-raw);
-  float   target_abs = (float)hole * 5.0f;
+  float   target_abs = (float)hole * 5.0f;          /* home-relative: hole index is read off the home-referenced disk */
   float   pos_cumul  = my_encoder.position_rad * (180.0f / 3.14159265f);
-  float   pos_mod    = fmodf(pos_cumul, 360.0f);
+  float   pos_mod    = fmodf(pos_cumul - home_offset_deg, 360.0f);  /* convert to home-relative for comparison */
   if (pos_mod < 0.0f) pos_mod += 360.0f;
   float disp;
   if (raw >= 0)
     disp =  fmodf((target_abs - pos_mod) + 360.0f, 360.0f);
   else
     disp = -fmodf((pos_mod - target_abs) + 360.0f, 360.0f);
-  start_move_deg(pos_cumul + disp);
+  start_move_deg(pos_cumul + disp);  /* pos_cumul is encoder-frame; disp is the same in both frames (pure rotation) */
 }
 
 /* ── Main 100Hz tick ─────────────────────────────────────────────────────── */
@@ -163,18 +162,8 @@ void state_machine_tick(void)
     }
     if (dev_dash.Cmd.set_home) {
       dev_dash.Cmd.set_home = 0;
-      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
-      motor_speed_cmd      = 0.0f;
-      home_offset_deg      = cumulative_angle_deg;
-      __disable_irq();
-      enc_reset_pending    = 1;
-      cumulative_angle_deg = 0.0f;
-      ctrl_direct_target   = 0.0f;
-      ctrl_traj_start      = 0.0f;
-      __enable_irq();
-      control_reset();
-      control_set_target(0.0f);
-      homed           = 1;
+      /* Mark current position as home — store offset, no encoder reset, no movement */
+      home_offset_deg = cumulative_angle_deg;
       sethome_led_cnt = 1;
     }
   }
@@ -397,9 +386,9 @@ void state_machine_tick(void)
           ctrl_direct_target   = 0.0f;
           ctrl_traj_start      = 0.0f;
           __enable_irq();
-          control_reset();
-          control_set_target(0.0f);
+          /* encoder-zero now coincides with the SET HOME point — keep home_offset_deg consistent */
           home_offset_deg = 0.0f;
+          control_reset();
         }
         current_state = STATE_IDLE;
       }
@@ -420,18 +409,19 @@ void state_machine_tick(void)
         ltlb_prev_g = ltlb_g;
       }
 
-      /* GO HOME: LT + A → 0° (SET HOME) */
+      /* GO HOME: LT + A → กลับ SET HOME position */
       if (joy_is_connected() && !emer_active) {
         static uint8_t lta_prev_g = 0;
         uint8_t lta_g = (joy_lt_f() > 0.5f && joy_btn(BTN_A));
         if (lta_g && !lta_prev_g && homed &&
             (current_state == STATE_IDLE   || current_state == STATE_AUTO ||
              current_state == STATE_MANUAL || current_state == STATE_MANUAL_MB)) {
-          homing_final_zero_pending = 0;
-          homing_rezero_on_arrive   = 0;
+          /* GO HOME: drive to SET HOME position, re-zero encoder on arrival */
+          homing_final_zero_pending = 1;
+          homing_rezero_on_arrive   = 1;
           skip_p2p_entry = 1;
           current_state  = STATE_AUTO;
-          start_move_deg(0.0f);
+          start_move_deg(home_offset_deg);
         }
         lta_prev_g = lta_g;
       }
@@ -475,18 +465,21 @@ void state_machine_tick(void)
           current_state != STATE_HOMING_BACKOFF &&
           current_state != STATE_HOMING_SLOW) {
         uint16_t mode_cmd = mb_slave.registers[0x01];
-        if (mode_cmd & 0x01) {
-          if (homed) {
-            homing_final_zero_pending = 0;
-            homing_rezero_on_arrive   = 0;
-            skip_p2p_entry = 1;
-            current_state  = STATE_AUTO;
-            start_move_deg(0.0f);
-          } else {
+        if (mode_cmd & 0x01) {  /* GO HOME — any state */
+          if (!homed) {
+            /* First time / never homed — must locate proximity sensor first */
             motor_speed_cmd = 0.0f;
             control_reset();
             homing_exti_enable();
             current_state = STATE_HOMING_FAST;
+          } else if (current_state == STATE_IDLE   || current_state == STATE_AUTO ||
+                     current_state == STATE_MANUAL || current_state == STATE_MANUAL_MB) {
+            /* Already homed — go straight to the user's SET HOME point */
+            homing_final_zero_pending = 1;
+            homing_rezero_on_arrive   = 1;
+            skip_p2p_entry = 1;
+            current_state  = STATE_AUTO;
+            start_move_deg(home_offset_deg);
           }
           mb_slave.registers[0x01] = 0;
         } else if (mode_cmd & 0x02) {
@@ -556,7 +549,6 @@ void state_machine_tick(void)
             t_prev_idle = joy_btn(BTN_T);
           } else {
             motor_speed_cmd = 0.0f;
-            joy_seq_state   = JSEQ_IDLE;
           }
           break;
 
@@ -691,7 +683,8 @@ void state_machine_tick(void)
               start_move_deg(dev_dash.Cmd.target_deg);
             } else if (p2p_raw != last_p2p_raw) {
               last_p2p_raw = p2p_raw;
-              start_move_deg((float)p2p_raw);
+              /* p2p_raw is home-relative (what BaseSystem shows/sends) */
+              start_move_deg((float)p2p_raw + home_offset_deg);
             }
           }
           if (traj_done) mb_slave.registers[0x27] = 0;

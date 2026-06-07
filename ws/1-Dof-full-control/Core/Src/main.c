@@ -174,12 +174,6 @@ int main(void)
   // pcb_io_test(&hlpuart1);           /* sequential terminal test */
   // pin_short_test(&hlpuart1);
 
-  /* Init joystick + PWM before pcb_interactive_test (which blocks) */
-  joystick_init(&huart3);
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart3, joy_dma_buf, sizeof(joy_dma_buf));
-  __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
-
   //pcb_interactive_test(&hlpuart1);    /* web UI — เปิด docs/pin_tester.html */
 
   // EMER (ESTOP_Pin PB13): active LOW, PULLUP — polled in 100Hz loop

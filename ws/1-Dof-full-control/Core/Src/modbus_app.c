@@ -174,9 +174,9 @@ void modbus_app_send(void)
                                      (reed_down ? 2 : 0) |
                                      (reed_grip ? 4 : 0);
 
-  /* Position: cumulative relative to SET HOME, wrapped 0–359.99° × 10 */
+  /* Position: relative to SET HOME point, wrapped 0-359.99° × 10 */
   {
-    float pd = cumulative_angle_deg;
+    float pd = cumulative_angle_deg - home_offset_deg;
     pd = fmodf(pd, 360.0f);
     if (pd < 0.0f) pd += 360.0f;
     mb_slave.registers[MB_REG_POS] = (int16_t)(pd * 10.0f);
